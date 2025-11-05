@@ -283,6 +283,18 @@ export function ProjectDashboard({ project, onBack }: ProjectDashboardProps) {
             report={selectedReport}
             projectName={project.name}
             onClose={() => setSelectedReport(null)}
+            onUpdate={() => {
+              loadReports();
+              // Recargar el reporte seleccionado para mostrar los cambios
+              supabase
+                .from('reports')
+                .select('*')
+                .eq('id', selectedReport.id)
+                .single()
+                .then(({ data }) => {
+                  if (data) setSelectedReport(data);
+                });
+            }}
           />
         )}
     </div>

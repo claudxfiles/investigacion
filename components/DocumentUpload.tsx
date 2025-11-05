@@ -4,6 +4,7 @@ import { useState, useRef } from 'react';
 import { X, Upload, File, Image, FileText } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
+import { RAGService } from '@/lib/rag-service';
 
 interface DocumentUploadProps {
   projectId: string;
@@ -98,28 +99,59 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
       for (const { file, description } of files) {
         const fileExt = file.name.split('.').pop();
         const fileName = `${projectId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+        const fileType = getFileType(file);
 
+        // 1. Subir archivo a storage
         const { error: uploadError } = await supabase.storage
           .from('documents')
           .upload(fileName, file);
 
         if (uploadError) throw uploadError;
 
-        const { error: insertError } = await supabase
+        // 2. Crear registro en base de datos con estado "processing"
+        const { data: documentData, error: insertError } = await supabase
           .from('documents')
           .insert({
             project_id: projectId,
             filename: file.name,
-            file_type: getFileType(file),
+            file_type: fileType,
             file_size: file.size,
             storage_path: fileName,
             description,
             uploaded_by: user.id,
-            processing_status: 'completed',
-            extracted_text: description || '',
-          });
+            processing_status: 'processing',
+            extracted_text: '',
+          })
+          .select()
+          .single();
 
         if (insertError) throw insertError;
+
+        // 3. Procesar documento para RAG (extraer texto, crear embeddings)
+        if (documentData && (fileType === 'pdf' || fileType === 'image')) {
+          try {
+            await RAGService.processDocumentForRAG(documentData.id, file, fileType);
+          } catch (ragError: any) {
+            console.error('Error procesando documento para RAG:', ragError);
+            // Si falla el procesamiento RAG, al menos guardar la descripción
+            await supabase
+              .from('documents')
+              .update({
+                extracted_text: description || '',
+                processing_status: description ? 'completed' : 'failed',
+              })
+              .eq('id', documentData.id);
+          }
+        } else {
+          // Para Word y otros tipos, solo guardar descripción
+          await supabase
+            .from('documents')
+            .update({
+              extracted_text: description || '',
+              processing_status: 'completed',
+            })
+            .eq('id', documentData.id);
+        }
       }
 
       onSuccess();

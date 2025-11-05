@@ -1,5 +1,6 @@
 import { Document, Project } from '@/types';
 import { ReportTemplates, getTemplateForReportType } from './templates';
+import { RAGService } from './rag-service';
 
 interface AIPromptOptions {
   project: Project;
@@ -58,7 +59,7 @@ export class AIService {
 
     // Si no hay documentos, usar generación básica
     if (documentContexts.length === 0 && options.documents.length === 0) {
-      return this.generateBasicReport(options);
+      return await this.generateBasicReport(options);
     }
 
     // Si hay documentos pero ninguno tiene texto extraído, usar información básica
@@ -73,7 +74,7 @@ export class AIService {
     }
 
     const systemPrompt = this.getSystemPrompt(options.reportType, options.project.type);
-    const userPrompt = this.getUserPrompt(options.project, documentContexts);
+    const userPrompt = await this.getUserPrompt(options.project, documentContexts);
 
     try {
       const response = await fetch(this.apiUrl, {
@@ -108,7 +109,7 @@ export class AIService {
       return this.parseAIResponse(aiContent);
     } catch (error) {
       console.error('Error en generación IA:', error);
-      return this.generateBasicReport(options);
+      return await this.generateBasicReport(options);
     }
   }
 
@@ -182,10 +183,41 @@ IMPORTANTE:
 - Asegúrate de que todos los hallazgos sean rastreables a documentos fuente`;
   }
 
-  private static getUserPrompt(project: Project, documents: Array<{ id: string; filename: string; description: string; type: string; content: string }>): string {
+  private static async getUserPrompt(
+    project: Project, 
+    documents: Array<{ id: string; filename: string; description: string; type: string; content: string }>
+  ): Promise<string> {
+    // Usar RAG para obtener contexto relevante
+    const documentIds = documents.map(doc => doc.id);
+    
+    // Generar queries para buscar contexto relevante
+    const queries = [
+      `información principal y hallazgos clave en ${project.name}`,
+      `datos importantes y conclusiones en ${project.name}`,
+      `análisis y recomendaciones en ${project.name}`,
+    ];
+
+    let ragContext = '';
+    try {
+      const ragResults = await Promise.all(
+        queries.map(query => 
+          RAGService.getRelevantContext(query, documentIds, 5)
+        )
+      );
+      
+      const uniqueContext = [...new Set(ragResults.filter(ctx => ctx.length > 0))].join('\n\n');
+      if (uniqueContext.length > 0) {
+        ragContext = `\n\nCONTEXTO RELEVANTE OBTENIDO MEDIANTE BÚSQUEDA SEMÁNTICA:\n${uniqueContext.substring(0, 4000)}\n\n`;
+      }
+    } catch (error) {
+      console.warn('Error obteniendo contexto RAG, usando contenido directo:', error);
+    }
+
     return `Analiza los siguientes documentos para el proyecto "${project.name}" (tipo ${project.type}).
 
 Descripción del Proyecto: ${project.description || 'No se proporcionó contexto adicional.'}
+
+${ragContext}
 
 Documentos a analizar:
 ${documents.map((doc, idx) => `
@@ -194,17 +226,21 @@ Documento ${idx + 1} (ID: ${doc.id}):
 - Tipo: ${doc.type}
 - Descripción: ${doc.description || 'Ninguna'}
 - Vista previa del contenido:
-${doc.content}
+${doc.content.substring(0, 2000)}
 `).join('\n')}
 
-Genera un informe completo de análisis ${project.type}. Enfócate en:
+Genera un informe completo de análisis ${project.type} basándote en TODO el contenido disponible. Enfócate en:
 1. Insights y patrones clave en todos los documentos
 2. Hallazgos críticos que requieren atención
 3. Riesgos y oportunidades
 4. Recomendaciones accionables con pasos específicos
 5. Conclusiones basadas en evidencia
 
-IMPORTANTE: Responde TODO en ESPAÑOL. Asegúrate de que todos los hallazgos referencien IDs de documentos específicos para trazabilidad.`;
+IMPORTANTE: 
+- Responde TODO en ESPAÑOL
+- Usa el contexto semántico obtenido para generar insights más profundos
+- Asegúrate de que todos los hallazgos referencien IDs de documentos específicos para trazabilidad
+- El análisis debe ser exhaustivo y basado en el contenido real de los documentos`;
   }
 
   private static parseAIResponse(aiContent: string): any {
@@ -275,12 +311,11 @@ IMPORTANTE: Responde TODO en ESPAÑOL. Asegúrate de que todos los hallazgos ref
     return priorityMap[p] || 'medium';
   }
 
-  private static generateBasicReport(options: AIPromptOptions): any {
+  private static async generateBasicReport(options: AIPromptOptions): Promise<any> {
     const completedDocs = options.documents.filter(d => d.processing_status === 'completed');
     const allDocs = options.documents.length > 0 ? options.documents : [];
     const docsToUse = completedDocs.length > 0 ? completedDocs : allDocs;
     
-    const template = getTemplateForReportType(options.reportType);
     const reportTypeMap: Record<string, string> = {
       'executive': 'ejecutivo',
       'technical': 'técnico',
@@ -288,106 +323,312 @@ IMPORTANTE: Responde TODO en ESPAÑOL. Asegúrate de que todos los hallazgos ref
       'financial': 'financiero',
     };
 
-    const projectTypeMap: Record<string, string> = {
-      'general': 'general',
-      'financial': 'financiero',
-      'legal': 'legal',
-    };
-
-    // Generar resumen ejecutivo basado en la plantilla
-    const generateExecutiveSummary = () => {
-      const sections = template.structure.map(section => {
-        switch (section) {
-          case 'Resumen Ejecutivo':
-          case 'Resumen Técnico':
-          case 'Resumen de Cumplimiento':
-          case 'Resumen Financiero':
-            return `Este informe ${reportTypeMap[options.reportType] || 'ejecutivo'} proporciona un análisis completo siguiendo el formato ${template.style.toLowerCase()}. El análisis está dirigido a ${template.audience.toLowerCase()} y utiliza un ${template.tone.toLowerCase()}.`;
-          case 'Metodología de Investigación':
-          case 'Metodología Detallada':
-            return `La metodología empleada incluye la revisión de ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} procesado${docsToUse.length > 1 ? 's' : ''} para el proyecto ${options.project.name}.`;
-          case 'Hallazgos Principales':
-          case 'Hallazgos de Cumplimiento / No Cumplimiento':
-            return `Se identificaron hallazgos clave basados en el análisis de los documentos proporcionados.`;
-          default:
-            return '';
-        }
-      }).filter(s => s);
-
-      return sections.join(' ') + ` ${options.project.description || 'Este proyecto requiere análisis adicional mediante la incorporación de más documentación.'}`;
-    };
-
     // Si no hay documentos, generar informe inicial del proyecto
     if (docsToUse.length === 0) {
-      const emptySummary = `Este informe ${reportTypeMap[options.reportType] || 'ejecutivo'} proporciona un análisis inicial del proyecto ${options.project.name} (tipo ${projectTypeMap[options.project.type] || 'general'}). 
-
-CONTEXTO: ${template.context}
-
-OBJETIVO: ${template.objective}
-
-El proyecto se encuentra en fase inicial de recopilación de documentación. ${options.project.description || 'Se recomienda subir documentos relevantes para realizar un análisis más completo siguiendo la estructura de la plantilla.'}`;
-
       return {
-        executiveSummary: emptySummary,
+        executiveSummary: `Este informe ${reportTypeMap[options.reportType] || 'ejecutivo'} proporciona un análisis inicial del proyecto ${options.project.name}.\n\n${options.project.description || 'El proyecto se encuentra en fase inicial de recopilación de documentación. Se recomienda subir documentos relevantes para realizar un análisis más completo.'}`,
         documentAnalysis: [],
         keyFindings: [
           {
             id: 'finding-1',
             title: 'Estado Inicial del Proyecto',
-            description: `El proyecto ${options.project.name} se encuentra en fase inicial. Se recomienda subir documentos para realizar un análisis más completo siguiendo la metodología de ${template.structure.join(', ')}.`,
+            description: `El proyecto ${options.project.name} se encuentra en fase inicial. Se recomienda subir documentos para realizar un análisis más completo.`,
             severity: 'low' as const,
             document_references: [],
           },
         ],
-        conclusions: `El proyecto ${options.project.name} está en desarrollo. Para un análisis más completo siguiendo la estructura de ${template.structure.join(' → ')}, se recomienda subir documentos relevantes al proyecto.`,
+        conclusions: `El proyecto ${options.project.name} está en desarrollo. Para un análisis más completo, se recomienda subir documentos relevantes al proyecto.`,
         recommendations: [
           {
             id: 'rec-1',
             title: 'Recopilación de Documentación',
-            description: `Subir documentos relevantes al proyecto para permitir un análisis más detallado siguiendo la plantilla de ${reportTypeMap[options.reportType]}.`,
+            description: 'Subir documentos relevantes al proyecto para permitir un análisis más detallado.',
             priority: 'high' as const,
             actionable_steps: [
               'Identificar documentos clave relacionados con el proyecto',
               'Subir documentos en formato PDF, Word o imágenes',
               'Añadir descripciones y contexto a cada documento',
-              `Generar un nuevo informe ${reportTypeMap[options.reportType]} después de subir documentos`,
+              'Generar un nuevo informe después de subir documentos',
             ],
           },
         ],
       };
     }
-    
-    return {
-      executiveSummary: generateExecutiveSummary(),
-      documentAnalysis: docsToUse.map((doc, idx) => ({
-        id: `analysis-${idx + 1}`,
-        title: `Análisis de Documento ${idx + 1}: ${doc.filename}`,
-        content: `Análisis de ${doc.filename} (${doc.file_type.toUpperCase()}, ${(doc.file_size / 1024).toFixed(2)} KB). ${doc.description || 'No se proporcionó contexto adicional.'} Este análisis sigue el ${template.style.toLowerCase()} y está dirigido a ${template.audience.toLowerCase()}.`,
-        document_references: [doc.id],
-      })),
-      keyFindings: [
-        {
+
+    // Extraer contenido real de los documentos con prioridad
+    const extractContent = (doc: any) => {
+      // Prioridad 1: extracted_text (contenido real del documento)
+      if (doc.extracted_text && doc.extracted_text.trim().length > 50) {
+        return {
+          source: 'extracted_text',
+          content: doc.extracted_text.trim(),
+          hasRealContent: true
+        };
+      }
+      // Prioridad 2: description (si tiene suficiente contenido)
+      if (doc.description && doc.description.trim().length > 20) {
+        return {
+          source: 'description',
+          content: doc.description.trim(),
+          hasRealContent: doc.description.trim().length > 100
+        };
+      }
+      return null;
+    };
+
+    // Analizar contenido de todos los documentos
+    const documentContents = docsToUse
+      .map(doc => ({
+        doc,
+        content: extractContent(doc)
+      }))
+      .filter(item => item.content !== null);
+
+    const allContent = documentContents
+      .map(item => item.content!.content)
+      .join('\n\n');
+
+    const hasRealContent = documentContents.some(item => item.content!.hasRealContent);
+
+    // Generar resumen ejecutivo usando RAG si está disponible
+    const generateExecutiveSummary = async () => {
+      if (!hasRealContent || allContent.length < 50) {
+        return `Este informe ${reportTypeMap[options.reportType] || 'ejecutivo'} analiza ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} del proyecto "${options.project.name}".\n\n${options.project.description ? `Contexto del proyecto: ${options.project.description}\n\n` : ''}Los documentos proporcionados no contienen suficiente contenido textual extraído para realizar un análisis profundo. Se recomienda procesar los documentos para extraer su contenido completo o añadir descripciones detalladas.`;
+      }
+
+      try {
+        // Intentar usar RAG para obtener contexto más relevante
+        const documentIds = docsToUse.map(d => d.id);
+        const ragContext = await RAGService.getRelevantContext(
+          `resumen ejecutivo y puntos clave de ${options.project.name}`,
+          documentIds,
+          5
+        );
+
+        if (ragContext && ragContext.length > 100) {
+          // Construir resumen ejecutivo basado en RAG
+          let summary = `Este informe ${reportTypeMap[options.reportType] || 'ejecutivo'} presenta un análisis exhaustivo de ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} del proyecto "${options.project.name}".\n\n`;
+          
+          if (options.project.description) {
+            summary += `Contexto del Proyecto:\n${options.project.description}\n\n`;
+          }
+
+          summary += `Resumen Ejecutivo basado en análisis semántico:\n\n${ragContext.substring(0, 1000)}${ragContext.length > 1000 ? '...' : ''}`;
+          
+          return summary.trim();
+        }
+      } catch (error) {
+        console.warn('Error usando RAG, usando método básico:', error);
+      }
+
+      // Fallback a método básico
+      const contentText = allContent;
+      const paragraphs = contentText.split(/\n\s*\n|\.\s+(?=[A-Z])/).filter(p => p.trim().length > 50);
+      const sentences = contentText.split(/[.!?]+/).filter(s => s.trim().length > 30);
+      const relevantParagraphs = paragraphs
+        .sort((a, b) => b.length - a.length)
+        .slice(0, 3)
+        .map(p => p.trim().substring(0, 200));
+
+      let summary = `Este informe ${reportTypeMap[options.reportType] || 'ejecutivo'} presenta un análisis exhaustivo de ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} del proyecto "${options.project.name}".\n\n`;
+      
+      if (options.project.description) {
+        summary += `Contexto del Proyecto:\n${options.project.description}\n\n`;
+      }
+
+      if (relevantParagraphs.length > 0) {
+        summary += `Resumen del Contenido:\n`;
+        relevantParagraphs.forEach((para, idx) => {
+          summary += `${para}${para.length >= 200 ? '...' : ''}\n\n`;
+        });
+      } else if (sentences.length > 0) {
+        summary += `Puntos Clave Identificados:\n`;
+        sentences.slice(0, 5).forEach((sentence, idx) => {
+          summary += `• ${sentence.trim()}.\n`;
+        });
+      }
+
+      return summary.trim();
+    };
+
+    // Generar análisis de documentos basado en contenido real
+    const generateDocumentAnalysis = () => {
+      return docsToUse.map((doc, idx) => {
+        const contentData = extractContent(doc);
+        const filename = doc.filename;
+        const fileType = doc.file_type.toUpperCase();
+        const fileSize = (doc.file_size / 1024).toFixed(2);
+        
+        if (contentData && contentData.hasRealContent) {
+          const content = contentData.content;
+          
+          // Extraer párrafos completos
+          const paragraphs = content.split(/\n\s*\n/).filter(p => p.trim().length > 30);
+          
+          // Si hay párrafos, usar los más relevantes
+          if (paragraphs.length > 0) {
+            const relevantContent = paragraphs.slice(0, 2).map(p => p.trim().substring(0, 250)).join('\n\n');
+            return {
+              id: `analysis-${idx + 1}`,
+              title: `Análisis de Documento ${idx + 1}: ${filename}`,
+              content: `Contenido del documento:\n\n${relevantContent}${content.length > 500 ? '...' : ''}`,
+              document_references: [doc.id],
+            };
+          } else {
+            // Si no hay párrafos claros, usar las primeras líneas significativas
+            const lines = content.split('\n').filter(l => l.trim().length > 20);
+            const preview = lines.slice(0, 8).join('\n').substring(0, 400);
+            return {
+              id: `analysis-${idx + 1}`,
+              title: `Análisis de Documento ${idx + 1}: ${filename}`,
+              content: `Contenido del documento:\n\n${preview}${content.length > 400 ? '...' : ''}`,
+              document_references: [doc.id],
+            };
+          }
+        } else if (contentData) {
+          // Tiene contenido pero es muy corto (solo description)
+          return {
+            id: `analysis-${idx + 1}`,
+            title: `Análisis de Documento ${idx + 1}: ${filename}`,
+            content: `Documento: ${filename} (${fileType}, ${fileSize} KB)\n\nDescripción proporcionada: ${contentData.content}\n\nNota: Este documento no contiene texto extraído. Se recomienda procesar el documento para extraer su contenido completo.`,
+            document_references: [doc.id],
+          };
+        } else {
+          return {
+            id: `analysis-${idx + 1}`,
+            title: `Análisis de Documento ${idx + 1}: ${filename}`,
+            content: `Documento: ${filename} (${fileType}, ${fileSize} KB)\n\nEste documento no contiene texto extraído ni descripción disponible. Para realizar un análisis completo, es necesario procesar el documento para extraer su contenido textual o añadir una descripción manual.`,
+            document_references: [doc.id],
+          };
+        }
+      });
+    };
+
+    // Generar hallazgos basados en el contenido
+    const generateKeyFindings = () => {
+      const findings: any[] = [];
+      
+      if (hasRealContent && allContent.length > 100) {
+        // Extraer conceptos y temas de manera más inteligente
+        const text = allContent.toLowerCase();
+        
+        // Palabras comunes a filtrar (stop words en español)
+        const stopWords = new Set(['este', 'esta', 'estos', 'estas', 'para', 'porque', 'cuando', 'donde', 'como', 'sobre', 'desde', 'hasta', 'entre', 'durante', 'mediante', 'según', 'contra', 'hacia', 'hasta', 'ante', 'bajo', 'cabe', 'con', 'de', 'desde', 'durante', 'en', 'entre', 'hacia', 'hasta', 'mediante', 'para', 'por', 'según', 'sin', 'sobre', 'tras', 'versus', 'vía', 'que', 'quien', 'cual', 'cuales', 'cuando', 'cuanto', 'donde', 'como', 'porque', 'aunque', 'mientras', 'si', 'sino', 'pero', 'mas', 'y', 'o', 'u', 'ni', 'no', 'también', 'tampoco', 'solo', 'solamente', 'aún', 'todavía', 'ya', 'ahora', 'entonces', 'luego', 'después', 'antes', 'hoy', 'ayer', 'mañana', 'siempre', 'nunca', 'a veces', 'mucho', 'poco', 'más', 'menos', 'muy', 'bastante', 'demasiado', 'todo', 'todos', 'toda', 'todas', 'alguno', 'algunos', 'alguna', 'algunas', 'ninguno', 'ningunos', 'ninguna', 'ningunas', 'otro', 'otros', 'otra', 'otras', 'mismo', 'mismos', 'misma', 'mismas', 'cada', 'cualquier', 'cualesquiera', 'tan', 'tanto', 'tanta', 'tantos', 'tantas', 'tanto', 'tanta', 'tantos', 'tantas']);
+        
+        // Extraer palabras significativas (más de 4 letras, no stop words)
+        const words = text
+          .replace(/[^\w\sáéíóúñü]/g, ' ')
+          .split(/\s+/)
+          .filter(w => w.length > 4 && !stopWords.has(w));
+        
+        const wordFreq: Record<string, number> = {};
+        words.forEach(word => {
+          wordFreq[word] = (wordFreq[word] || 0) + 1;
+        });
+        
+        // Obtener las 5-7 palabras más frecuentes
+        const topWords = Object.entries(wordFreq)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 7)
+          .filter(([word, count]) => count >= 2) // Solo palabras que aparecen al menos 2 veces
+          .map(([word]) => word);
+
+        if (topWords.length > 0) {
+          findings.push({
+            id: 'finding-1',
+            title: 'Conceptos y Temas Relevantes',
+            description: `El análisis del contenido revela los siguientes conceptos y temas principales: ${topWords.join(', ')}. Estos términos aparecen recurrentemente en la documentación, indicando su importancia central en el contexto del proyecto.`,
+            severity: 'medium' as const,
+            document_references: docsToUse.map(d => d.id),
+          });
+        }
+
+        // Identificar información específica si es posible
+        const sentences = allContent.split(/[.!?]+/).filter(s => s.trim().length > 40);
+        if (sentences.length > 3) {
+          findings.push({
+            id: 'finding-2',
+            title: 'Contenido Sustancial Disponible',
+            description: `Los documentos analizados contienen información textual completa y estructurada. Se identificaron múltiples secciones y conceptos relevantes que permiten un análisis detallado del proyecto.`,
+            severity: 'low' as const,
+            document_references: docsToUse.filter(d => extractContent(d)?.hasRealContent).map(d => d.id),
+          });
+        }
+      } else {
+        findings.push({
           id: 'finding-1',
-          title: 'Completitud de la Colección de Documentos',
-          description: `El proyecto contiene ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} procesado${docsToUse.length > 1 ? 's' : ''} que cubren el alcance de los requisitos de análisis ${projectTypeMap[options.project.type] || 'general'}. El análisis sigue la estructura: ${template.structure.join(' → ')}.`,
+          title: 'Contenido Limitado Disponible',
+          description: `Los documentos proporcionados contienen información limitada o no se ha podido extraer su contenido completo. Para un análisis más profundo, se recomienda procesar los documentos para extraer su contenido textual o añadir descripciones detalladas.`,
           severity: 'medium' as const,
           document_references: docsToUse.map(d => d.id),
-        },
-      ],
-      conclusions: `Basado en el análisis de ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} en el proyecto ${options.project.name}, este informe ${reportTypeMap[options.reportType]} identifica patrones clave, riesgos y oportunidades siguiendo el ${template.tone.toLowerCase()} requerido para ${template.audience.toLowerCase()}.`,
-      recommendations: [
+        });
+      }
+
+      return findings.length > 0 ? findings : [
         {
+          id: 'finding-1',
+          title: 'Revisión de Documentación',
+          description: `Se han revisado ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} del proyecto. ${hasRealContent ? 'Los documentos contienen información disponible para análisis.' : 'Se requiere procesamiento adicional de los documentos.'}`,
+          severity: 'medium' as const,
+          document_references: docsToUse.map(d => d.id),
+        }
+      ];
+    };
+
+    // Generar conclusiones basadas en el contenido
+    const generateConclusions = () => {
+      if (!hasRealContent || allContent.length < 100) {
+        return `El análisis de ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} del proyecto "${options.project.name}" muestra que ${options.project.description || 'los documentos no contienen suficiente contenido textual extraído para realizar un análisis completo'}. Para obtener insights más profundos, se recomienda procesar los documentos para extraer su contenido completo o utilizar herramientas de análisis con IA.`;
+      }
+
+      // Extraer conclusiones más específicas del contenido
+      const paragraphs = allContent.split(/\n\s*\n/).filter(p => p.trim().length > 50);
+      const summaryParagraph = paragraphs.length > 0 
+        ? paragraphs[0].substring(0, 200) 
+        : allContent.substring(0, 200);
+
+      return `Basado en el análisis exhaustivo de ${docsToUse.length} documento${docsToUse.length > 1 ? 's' : ''} del proyecto "${options.project.name}", ${options.project.description ? `en el contexto de ${options.project.description}, ` : ''}se han identificado elementos y patrones relevantes en la documentación. ${summaryParagraph}${allContent.length > 200 ? '...' : ''}\n\nSe recomienda realizar un análisis más profundo utilizando herramientas de IA para obtener insights específicos y detallados sobre el contenido de los documentos.`;
+    };
+
+    // Generar recomendaciones prácticas
+    const generateRecommendations = () => {
+      const recommendations: any[] = [];
+
+      if (allContent.length === 0) {
+        recommendations.push({
           id: 'rec-1',
-          title: 'Estándares de Documentación',
-          description: `Mantener estándares de documentación consistentes siguiendo el ${template.style.toLowerCase()} requerido para este tipo de informe.`,
+          title: 'Procesamiento de Documentos',
+          description: 'Algunos documentos no contienen texto extraído. Se recomienda procesar los documentos para extraer su contenido textual.',
+          priority: 'high' as const,
+          actionable_steps: [
+            'Verificar que los documentos contengan texto extraíble',
+            'Procesar documentos PDF o imágenes con OCR si es necesario',
+            'Añadir descripciones manuales cuando el contenido no sea extraíble',
+          ],
+        });
+      } else {
+        recommendations.push({
+          id: 'rec-1',
+          title: 'Análisis Profundo',
+          description: 'Se recomienda realizar un análisis más detallado de los documentos utilizando herramientas de IA para obtener insights más específicos.',
           priority: 'medium' as const,
           actionable_steps: [
-            'Establecer convenciones de nomenclatura de documentos',
-            'Implementar procedimientos de control de versiones',
-            `Asegurar que la documentación cumpla con los estándares de ${template.audience.toLowerCase()}`,
+            'Habilitar el análisis con IA para obtener insights más profundos',
+            'Revisar los hallazgos identificados en los documentos',
+            'Considerar la incorporación de documentos adicionales si es necesario',
           ],
-        },
-      ],
+        });
+      }
+
+      return recommendations;
+    };
+    
+    return {
+      executiveSummary: await generateExecutiveSummary(),
+      documentAnalysis: generateDocumentAnalysis(),
+      keyFindings: generateKeyFindings(),
+      conclusions: generateConclusions(),
+      recommendations: generateRecommendations(),
     };
   }
 }
