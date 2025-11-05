@@ -6,8 +6,6 @@ const nextConfig = {
   },
   // Transpilar react-pdf y pdfjs-dist para compatibilidad
   transpilePackages: ['react-pdf', 'pdfjs-dist'],
-  // Excluir pdf-parse del bundling del servidor (usar CommonJS directamente)
-  serverComponentsExternalPackages: ['pdf-parse'],
   webpack: (config, { isServer, webpack }) => {
     if (!isServer) {
       config.resolve.fallback = {
@@ -33,30 +31,7 @@ const nextConfig = {
         })
       );
     } else {
-      // Para el servidor, excluir pdf-parse y pdfjs-dist del bundling
-      // Esto permite que se carguen como CommonJS en runtime
-      config.externals = config.externals || [];
-      
-      // Excluir pdf-parse del bundling - se carga en runtime
-      if (Array.isArray(config.externals)) {
-        config.externals.push('pdf-parse');
-      } else if (typeof config.externals === 'function') {
-        const originalExternals = config.externals;
-        config.externals = [
-          originalExternals,
-          (context, request, callback) => {
-            if (request === 'pdf-parse') {
-              return callback(null, 'commonjs ' + request);
-            }
-            originalExternals(context, request, callback);
-          },
-        ];
-      } else {
-        config.externals = config.externals || {};
-        config.externals['pdf-parse'] = 'commonjs pdf-parse';
-      }
-      
-      // Permitir que pdf-parse use CommonJS en el servidor
+      // Para el servidor, evitar empaquetar canvas y pdfjs-dist
       config.resolve.alias = {
         ...config.resolve.alias,
         canvas: false,

@@ -9,6 +9,7 @@ import { DocumentList } from './DocumentList';
 import { ReportGenerator } from './ReportGenerator';
 import { ReportViewer } from './ReportViewer';
 
+
 interface ProjectDashboardProps {
   project: Project;
   onBack: () => void;
@@ -283,18 +284,6 @@ export function ProjectDashboard({ project, onBack }: ProjectDashboardProps) {
             report={selectedReport}
             projectName={project.name}
             onClose={() => setSelectedReport(null)}
-            onUpdate={() => {
-              loadReports();
-              // Recargar el reporte seleccionado para mostrar los cambios
-              supabase
-                .from('reports')
-                .select('*')
-                .eq('id', selectedReport.id)
-                .single()
-                .then(({ data }) => {
-                  if (data) setSelectedReport(data);
-                });
-            }}
           />
         )}
     </div>
