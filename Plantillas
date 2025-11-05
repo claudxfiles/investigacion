@@ -1,0 +1,125 @@
+🧩 PLANTILLA 1 — Informe Ejecutivo de Investigación
+
+C-CONTEXTO:
+El informe recopila información de diversas fuentes y sintetiza los principales resultados, hallazgos y conclusiones de una investigación. Debe servir como resumen ejecutivo de alto nivel para tomadores de decisiones.
+
+O-OBJETIVO:
+Generar un informe ejecutivo de investigación con un resumen claro, hallazgos clave y conclusiones estratégicas, usando un lenguaje formal, directo y orientado a resultados.
+
+S-ESTILO:
+Redacción profesional, tipo “resumen para alta dirección”, con encabezados, viñetas y secciones bien definidas.
+
+T-TONO:
+Formal, analítico y objetivo. Evitar opiniones personales o lenguaje emocional.
+
+A-PÚBLICO:
+Directivos, gerentes o autoridades que necesitan una visión rápida y sintética de los resultados del análisis.
+
+R-RESPUESTA:
+Presentar el informe en formato Markdown, con las siguientes secciones:
+
+Resumen Ejecutivo
+
+Metodología de Investigación
+
+Hallazgos Principales
+
+Conclusiones y Recomendaciones
+
+Anexo de Referencias
+
+⚙️ PLANTILLA 2 — Informe Técnico de Investigación
+
+C-CONTEXTO:
+El informe debe documentar un análisis técnico o científico basado en datos, experimentos, o revisión documental especializada.
+
+O-OBJETIVO:
+Generar un informe técnico de investigación, incluyendo detalles metodológicos, interpretación de resultados y recomendaciones técnicas.
+
+S-ESTILO:
+Estilo técnico, estructurado y basado en evidencia. Debe incluir tablas, listas numeradas o figuras si es relevante.
+
+T-TONO:
+Preciso, técnico y académico.
+
+A-PÚBLICO:
+Profesionales o especialistas del área técnica o científica que requieren conocer los detalles del proceso y los resultados del análisis.
+
+R-RESPUESTA:
+Estructura en Markdown:
+
+Resumen Técnico
+
+Objetivos del Estudio
+
+Metodología Detallada
+
+Resultados y Análisis
+
+Conclusiones Técnicas
+
+Referencias Bibliográficas
+
+⚖️ PLANTILLA 3 — Informe de Cumplimiento o Auditoría
+
+C-CONTEXTO:
+Se requiere evaluar si un conjunto de documentos, procesos o actividades cumplen con normativas legales, reglamentarias o internas.
+
+O-OBJETIVO:
+Elaborar un informe de cumplimiento, identificando desviaciones, riesgos y recomendaciones correctivas.
+
+S-ESTILO:
+Estilo formal y normativo. Usa un lenguaje propio de auditoría, con claridad y precisión en los hallazgos.
+
+T-TONO:
+Imparcial, objetivo y profesional.
+
+A-PÚBLICO:
+Auditores, equipos legales, directores de cumplimiento o autoridades regulatorias.
+
+R-RESPUESTA:
+Estructura sugerida en Markdown:
+
+Resumen de Cumplimiento
+
+Alcance y Criterios de Evaluación
+
+Hallazgos de Cumplimiento / No Cumplimiento
+
+Análisis de Riesgos
+
+Recomendaciones Correctivas
+
+Anexo de Evidencias
+
+💰 PLANTILLA 4 — Informe Financiero o Económico
+
+C-CONTEXTO:
+El informe se centra en analizar información económica, presupuestaria o contable para determinar desempeño financiero, tendencias o riesgos.
+
+O-OBJETIVO:
+Generar un informe financiero de análisis, basado en datos económicos o financieros, con hallazgos cuantitativos y conclusiones estratégicas.
+
+S-ESTILO:
+Estilo analítico y cuantitativo. Incluye cifras, indicadores clave, tablas o gráficos cuando corresponda.
+
+T-TONO:
+Profesional, objetivo y analítico.
+
+A-PÚBLICO:
+Analistas financieros, inversionistas, autoridades fiscales o gerentes de finanzas.
+
+R-RESPUESTA:
+Estructura en Markdown:
+
+Resumen Financiero
+
+Objetivos del Análisis
+
+Datos y Fuentes
+
+Análisis de Resultados
+
+Conclusiones y Recomendaciones Estratégicas
+
+Anexo de Tablas o Indicadores
