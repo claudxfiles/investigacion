@@ -1,10 +1,9 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { X, Upload, File, Image, FileText } from 'lucide-react';
+import { X, Upload, File, Image, FileText, Sheet } from 'lucide-react';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
-import { RAGService } from '@/lib/rag-service';
 
 interface DocumentUploadProps {
   projectId: string;
@@ -54,15 +53,24 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
     setIsDragging(false);
 
     const droppedFiles = Array.from(e.dataTransfer.files);
+    const validExtensions = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'xlsx', 'xls'];
+    
     const validFiles = droppedFiles.filter(file => {
       const ext = file.name.split('.').pop()?.toLowerCase();
-      return ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png'].includes(ext || '');
+      return validExtensions.includes(ext || '');
+    });
+
+    const invalidFiles = droppedFiles.filter(file => {
+      const ext = file.name.split('.').pop()?.toLowerCase();
+      return !validExtensions.includes(ext || '');
     });
 
     if (validFiles.length > 0) {
       addFiles(validFiles);
-    } else {
-      setError('Por favor, sube solo archivos PDF, Word o imágenes (JPG, PNG)');
+    }
+    
+    if (invalidFiles.length > 0) {
+      setError(`Archivos no soportados: ${invalidFiles.map(f => f.name).join(', ')}. Solo se aceptan: PDF, Word, Excel, Imágenes`);
     }
   };
 
@@ -74,17 +82,30 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  const getFileType = (file: File): 'pdf' | 'word' | 'image' | 'other' => {
+  const getFileType = (file: File): 'pdf' | 'word' | 'image' | 'excel' | 'other' => {
     const type = file.type.toLowerCase();
+    const name = file.name.toLowerCase();
+    
+    // Verificar por extensión primero (más confiable)
+    if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'excel';
+    if (name.endsWith('.pdf')) return 'pdf';
+    if (name.endsWith('.doc') || name.endsWith('.docx')) return 'word';
+    if (name.endsWith('.jpg') || name.endsWith('.jpeg') || name.endsWith('.png')) return 'image';
+    
+    // Verificar por tipo MIME como fallback
     if (type.includes('pdf')) return 'pdf';
-    if (type.includes('word') || type.includes('document')) return 'word';
+    if (type.includes('word') || type.includes('document') || type.includes('msword')) return 'word';
     if (type.includes('image')) return 'image';
+    if (type.includes('sheet') || type.includes('excel') || type.includes('spreadsheet')) return 'excel';
+    
     return 'other';
   };
 
-  const getFileIcon = (type: string) => {
+  const getFileIcon = (type: string, filename: string) => {
+    const name = filename.toLowerCase();
     if (type.includes('image')) return <Image className="w-5 h-5 text-purple-400" />;
     if (type.includes('pdf')) return <FileText className="w-5 h-5 text-red-400" />;
+    if (type.includes('sheet') || type.includes('excel') || name.endsWith('.xlsx') || name.endsWith('.xls')) return <Sheet className="w-5 h-5 text-green-400" />;
     if (type.includes('word') || type.includes('document')) return <FileText className="w-5 h-5 text-blue-400" />;
     return <File className="w-5 h-5 text-slate-400" />;
   };
@@ -96,20 +117,43 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
     setError('');
 
     try {
+      const { DocumentProcessor } = await import('@/lib/document-processor');
+      const { RAGService } = await import('@/lib/rag-service');
+      const { EmbeddingService } = await import('@/lib/embedding-service');
+      
+      // Inicializar servicios de IA si está disponible
+      const openaiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
+      if (openaiKey) {
+        EmbeddingService.initialize(openaiKey);
+      }
+
       for (const { file, description } of files) {
         const fileExt = file.name.split('.').pop();
         const fileName = `${projectId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
-        const fileType = getFileType(file);
 
-        // 1. Subir archivo a storage
         const { error: uploadError } = await supabase.storage
           .from('documents')
           .upload(fileName, file);
 
         if (uploadError) throw uploadError;
 
-        // 2. Crear registro en base de datos con estado "processing"
-        const { data: documentData, error: insertError } = await supabase
+        const fileType = getFileType(file);
+        let extractedText = description || '';
+        let processingStatus: 'pending' | 'processing' | 'completed' | 'failed' = 'pending';
+        
+        // Procesar documento según su tipo
+        try {
+          extractedText = await DocumentProcessor.processDocument(file, fileType);
+          processingStatus = 'completed';
+          console.log(`Documento procesado exitosamente: ${file.name} (${extractedText.length} caracteres)`);
+        } catch (error) {
+          console.error('Error al procesar documento:', error);
+          extractedText = description || `Archivo ${fileType.toUpperCase()} (procesamiento manual requerido)`;
+          processingStatus = 'completed'; // Marcar como completado aunque no se extrajo texto
+        }
+
+        // Insertar documento en la base de datos
+        const { data: insertedDoc, error: insertError } = await supabase
           .from('documents')
           .insert({
             project_id: projectId,
@@ -119,38 +163,38 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
             storage_path: fileName,
             description,
             uploaded_by: user.id,
-            processing_status: 'processing',
-            extracted_text: '',
+            processing_status: processingStatus,
+            extracted_text: extractedText,
           })
           .select()
           .single();
 
         if (insertError) throw insertError;
 
-        // 3. Procesar documento para RAG (extraer texto, crear embeddings)
-        if (documentData && (fileType === 'pdf' || fileType === 'image')) {
+        // Procesar con RAG si hay texto extraído y OpenAI está configurado
+        if (openaiKey && extractedText && extractedText.length > 100 && insertedDoc) {
           try {
-            await RAGService.processDocumentForRAG(documentData.id, file, fileType);
-          } catch (ragError: any) {
-            console.error('Error procesando documento para RAG:', ragError);
-            // Si falla el procesamiento RAG, al menos guardar la descripción
-            await supabase
-              .from('documents')
-              .update({
-                extracted_text: description || '',
-                processing_status: description ? 'completed' : 'failed',
-              })
-              .eq('id', documentData.id);
+            console.log(`Generando embeddings para documento: ${file.name}`);
+            const ragResult = await RAGService.processDocument(
+              insertedDoc.id,
+              projectId,
+              extractedText,
+              {
+                filename: file.name,
+                fileType: fileType,
+                uploadedAt: new Date().toISOString(),
+              }
+            );
+            
+            if (ragResult.success) {
+              console.log(`✅ RAG procesado: ${ragResult.chunksCreated} chunks creados para ${file.name}`);
+            } else {
+              console.warn(`⚠️ RAG no procesado para ${file.name}: ${ragResult.error}`);
+            }
+          } catch (ragError) {
+            console.error('Error en procesamiento RAG:', ragError);
+            // No fallar la subida si RAG falla
           }
-        } else {
-          // Para Word y otros tipos, solo guardar descripción
-          await supabase
-            .from('documents')
-            .update({
-              extracted_text: description || '',
-              processing_status: 'completed',
-            })
-            .eq('id', documentData.id);
         }
       }
 
@@ -189,12 +233,12 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
           >
             <Upload className="w-12 h-12 text-slate-400 mx-auto mb-4" />
             <p className="text-white font-medium mb-2">Haz clic para subir o arrastra y suelta</p>
-            <p className="text-slate-400 text-sm">PDF, documentos Word o imágenes (JPG, PNG)</p>
+            <p className="text-slate-400 text-sm">PDF, Word, Excel (XLSX, XLS) o imágenes (JPG, PNG)</p>
             <input
               ref={fileInputRef}
               type="file"
               multiple
-              accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+              accept=".pdf,.doc,.docx,.xlsx,.xls,.jpg,.jpeg,.png,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg,image/png"
               onChange={handleFileSelect}
               className="hidden"
             />
@@ -210,7 +254,7 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
                 >
                   <div className="flex items-start gap-3 mb-3">
                     <div className="p-2 bg-slate-800 rounded">
-                      {getFileIcon(fileWithDesc.file.type)}
+                      {getFileIcon(fileWithDesc.file.type, fileWithDesc.file.name)}
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-white font-medium truncate">{fileWithDesc.file.name}</p>

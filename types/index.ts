@@ -86,3 +86,25 @@ export interface N8NWorkflow {
   created_at: string;
 }
 
+export interface DocumentEmbedding {
+  id: string;
+  document_id: string;
+  project_id: string;
+  chunk_text: string;
+  chunk_index: number;
+  embedding: number[];
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SearchResult {
+  id: string;
+  document_id: string;
+  chunk_text: string;
+  chunk_index: number;
+  similarity: number;
+  metadata: Record<string, unknown>;
+  document?: Document;
+}
+

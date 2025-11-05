@@ -1,196 +1,334 @@
 /**
- * Servicio RAG (Retrieval Augmented Generation) para búsqueda semántica de documentos
+ * Servicio RAG (Retrieval-Augmented Generation) para búsqueda semántica
  */
 
 import { supabase } from './supabase';
-import { EmbeddingsService } from './embeddings-service';
-// DocumentProcessor se importa dinámicamente para evitar problemas de SSR
+import { EmbeddingService } from './embedding-service';
+import { Document } from '@/types';
 
-export interface RAGSearchResult {
+export interface DocumentChunk {
+  id: string;
   document_id: string;
-  content: string;
-  content_index: number;
+  chunk_text: string;
+  chunk_index: number;
   similarity: number;
-  metadata: Record<string, unknown>;
+  metadata: Record<string, any>;
+}
+
+export interface SearchResult {
+  chunks: DocumentChunk[];
+  documents: Document[];
+  context: string;
+}
+
+export interface ProcessingResult {
+  success: boolean;
+  documentId: string;
+  chunksCreated: number;
+  error?: string;
 }
 
 export class RAGService {
   /**
-   * Procesa un documento: extrae texto, crea chunks y genera embeddings
+   * Procesa un documento y genera embeddings para sus chunks
    */
-  static async processDocumentForRAG(
+  static async processDocument(
     documentId: string,
-    file: File,
-    fileType: string
-  ): Promise<{ extractedText: string; chunksCount: number }> {
+    projectId: string,
+    extractedText: string,
+    metadata: Record<string, any> = {}
+  ): Promise<ProcessingResult> {
     try {
-      // Importar DocumentProcessor dinámicamente solo cuando sea necesario (evita problemas de SSR)
-      const { DocumentProcessor } = await import('./document-processor');
-      
-      // 1. Extraer texto del documento
-      const extractedText = await DocumentProcessor.processDocument(file, fileType);
-      
-      if (!extractedText || extractedText.trim().length < 50) {
-        throw new Error('No se pudo extraer suficiente texto del documento');
+      if (!extractedText || extractedText.trim().length === 0) {
+        return {
+          success: false,
+          documentId,
+          chunksCreated: 0,
+          error: 'No text to process',
+        };
       }
 
-      // 2. Dividir en chunks
-      const chunks = DocumentProcessor.chunkText(extractedText, 1000, 200);
+      // Dividir texto en chunks
+      const chunks = EmbeddingService.chunkText(extractedText, 1000, 200);
       
       if (chunks.length === 0) {
-        throw new Error('No se pudieron crear chunks del documento');
+        return {
+          success: false,
+          documentId,
+          chunksCreated: 0,
+          error: 'No chunks generated',
+        };
       }
 
-      // 3. Generar embeddings para cada chunk
-      const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
-      if (!apiKey) {
-        throw new Error('OpenAI API key no configurada');
-      }
+      console.log(`Processing document ${documentId}: ${chunks.length} chunks`);
 
-      EmbeddingsService.initialize(apiKey);
-      const embeddings = await EmbeddingsService.generateEmbeddings(chunks);
+      // Generar embeddings para todos los chunks
+      const embeddings = await EmbeddingService.generateEmbeddings(chunks);
 
-      // 4. Eliminar embeddings antiguos del documento
-      await supabase
-        .from('document_embeddings')
-        .delete()
-        .eq('document_id', documentId);
-
-      // 5. Insertar nuevos embeddings
-      // Supabase acepta arrays directamente para el tipo vector
-      const embeddingsToInsert = chunks.map((chunk, index) => ({
+      // Preparar datos para insertar
+      const embeddingsData = embeddings.map((result, index) => ({
         document_id: documentId,
-        content: chunk,
-        content_index: index,
-        embedding: embeddings[index], // Array de números - Supabase lo convierte a vector
+        project_id: projectId,
+        chunk_text: result.text,
+        chunk_index: index,
+        embedding: result.embedding,
         metadata: {
-          chunk_index: index,
-          chunk_length: chunk.length,
+          ...metadata,
+          tokens: result.tokens,
+          chunk_length: result.text.length,
         },
       }));
 
-      const { error: insertError } = await supabase
+      // Insertar embeddings en la base de datos
+      const { error } = await supabase
         .from('document_embeddings')
-        .insert(embeddingsToInsert);
+        .insert(embeddingsData);
 
-      if (insertError) {
-        throw new Error(`Error insertando embeddings: ${insertError.message}`);
+      if (error) {
+        console.error('Error inserting embeddings:', error);
+        throw error;
       }
 
-      // 6. Actualizar el documento con el texto extraído
-      await supabase
-        .from('documents')
-        .update({
-          extracted_text: extractedText,
-          processing_status: 'completed',
-          processed_at: new Date().toISOString(),
-        })
-        .eq('id', documentId);
+      console.log(`Successfully processed document ${documentId}: ${chunks.length} chunks created`);
 
       return {
-        extractedText,
-        chunksCount: chunks.length,
+        success: true,
+        documentId,
+        chunksCreated: chunks.length,
       };
-    } catch (error: any) {
-      console.error('Error procesando documento para RAG:', error);
-      
-      // Marcar como fallido
-      await supabase
-        .from('documents')
-        .update({
-          processing_status: 'failed',
-        })
-        .eq('id', documentId);
-
-      throw error;
+    } catch (error) {
+      console.error('Error processing document:', error);
+      return {
+        success: false,
+        documentId,
+        chunksCreated: 0,
+        error: error instanceof Error ? error.message : 'Unknown error',
+      };
     }
   }
 
   /**
-   * Busca documentos similares usando búsqueda semántica
+   * Busca documentos similares usando búsqueda vectorial
    */
-  static async searchSimilarDocuments(
+  static async searchSimilar(
     query: string,
-    documentIds?: string[],
+    projectId: string,
     limit: number = 10,
-    threshold: number = 0.7
-  ): Promise<RAGSearchResult[]> {
+    threshold: number = 0.78
+  ): Promise<SearchResult> {
     try {
-      // 1. Generar embedding de la query
-      const apiKey = process.env.NEXT_PUBLIC_OPENAI_API_KEY;
-      if (!apiKey) {
-        throw new Error('OpenAI API key no configurada');
-      }
+      // Generar embedding para la query
+      const queryEmbedding = await EmbeddingService.generateEmbedding(query);
 
-      EmbeddingsService.initialize(apiKey);
-      const queryEmbedding = await EmbeddingsService.generateEmbedding(query);
-
-      // 2. Buscar documentos similares usando la función de Supabase
-      // Supabase acepta arrays directamente para el tipo vector
-      const { data, error } = await supabase.rpc('match_document_embeddings', {
-        query_embedding: queryEmbedding, // Array de números
+      // Buscar chunks similares usando la función de Supabase
+      const { data: matches, error } = await supabase.rpc('match_documents', {
+        query_embedding: queryEmbedding.embedding,
         match_threshold: threshold,
         match_count: limit,
-        filter_document_ids: documentIds || null,
+        filter_project_id: projectId,
       });
 
       if (error) {
-        throw new Error(`Error en búsqueda semántica: ${error.message}`);
+        console.error('Error searching documents:', error);
+        throw error;
       }
 
-      return (data || []).map((item: any) => ({
-        document_id: item.document_id,
-        content: item.content,
-        content_index: item.content_index,
-        similarity: item.similarity,
-        metadata: item.metadata || {},
+      if (!matches || matches.length === 0) {
+        return {
+          chunks: [],
+          documents: [],
+          context: '',
+        };
+      }
+
+      // Obtener IDs únicos de documentos
+      const documentIds = [...new Set(matches.map((m: any) => m.document_id))];
+
+      // Obtener información completa de los documentos
+      const { data: documents, error: docsError } = await supabase
+        .from('documents')
+        .select('*')
+        .in('id', documentIds);
+
+      if (docsError) {
+        console.error('Error fetching documents:', docsError);
+      }
+
+      // Crear mapa de documentos para fácil acceso
+      const documentsMap = new Map(
+        (documents || []).map(doc => [doc.id, doc])
+      );
+
+      // Formatear chunks con información del documento
+      const chunks: DocumentChunk[] = matches.map((match: any) => ({
+        id: match.id,
+        document_id: match.document_id,
+        chunk_text: match.chunk_text,
+        chunk_index: match.chunk_index,
+        similarity: match.similarity,
+        metadata: match.metadata,
       }));
-    } catch (error: any) {
-      console.error('Error en búsqueda RAG:', error);
+
+      // Generar contexto consolidado
+      const context = this.buildContext(chunks, documentsMap);
+
+      return {
+        chunks,
+        documents: documents || [],
+        context,
+      };
+    } catch (error) {
+      console.error('Error in similarity search:', error);
       throw error;
     }
   }
 
   /**
-   * Obtiene contexto relevante para una query usando RAG
+   * Construye contexto consolidado a partir de chunks
    */
-  static async getRelevantContext(
-    query: string,
-    documentIds: string[],
-    maxChunks: number = 10
-  ): Promise<string> {
-    try {
-      const results = await this.searchSimilarDocuments(query, documentIds, maxChunks, 0.6);
-      
-      if (results.length === 0) {
-        return '';
+  private static buildContext(
+    chunks: DocumentChunk[],
+    documentsMap: Map<string, Document>
+  ): string {
+    let context = '';
+
+    // Agrupar chunks por documento
+    const chunksByDocument = new Map<string, DocumentChunk[]>();
+    
+    for (const chunk of chunks) {
+      if (!chunksByDocument.has(chunk.document_id)) {
+        chunksByDocument.set(chunk.document_id, []);
       }
-
-      // Combinar chunks relevantes ordenados por similitud
-      const context = results
-        .sort((a, b) => b.similarity - a.similarity)
-        .map((result, idx) => `[Chunk ${idx + 1} del documento ${result.document_id}]\n${result.content}`)
-        .join('\n\n---\n\n');
-
-      return context;
-    } catch (error: any) {
-      console.error('Error obteniendo contexto RAG:', error);
-      return '';
+      chunksByDocument.get(chunk.document_id)!.push(chunk);
     }
+
+    // Construir contexto por documento
+    for (const [documentId, docChunks] of chunksByDocument.entries()) {
+      const document = documentsMap.get(documentId);
+      
+      if (document) {
+        context += `\n\n--- Documento: ${document.filename} ---\n`;
+        
+        // Ordenar chunks por índice
+        docChunks.sort((a, b) => a.chunk_index - b.chunk_index);
+        
+        for (const chunk of docChunks) {
+          context += `\n[Relevancia: ${(chunk.similarity * 100).toFixed(1)}%]\n`;
+          context += chunk.chunk_text;
+          context += '\n';
+        }
+      }
+    }
+
+    return context.trim();
   }
 
   /**
    * Elimina embeddings de un documento
    */
-  static async deleteDocumentEmbeddings(documentId: string): Promise<void> {
-    const { error } = await supabase
-      .from('document_embeddings')
-      .delete()
-      .eq('document_id', documentId);
+  static async deleteDocumentEmbeddings(documentId: string): Promise<boolean> {
+    try {
+      const { error } = await supabase
+        .from('document_embeddings')
+        .delete()
+        .eq('document_id', documentId);
 
-    if (error) {
-      throw new Error(`Error eliminando embeddings: ${error.message}`);
+      if (error) {
+        console.error('Error deleting embeddings:', error);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      console.error('Error in deleteDocumentEmbeddings:', error);
+      return false;
     }
   }
-}
 
+  /**
+   * Cuenta el número de embeddings de un documento
+   */
+  static async countDocumentEmbeddings(documentId: string): Promise<number> {
+    try {
+      const { count, error } = await supabase
+        .from('document_embeddings')
+        .select('*', { count: 'exact', head: true })
+        .eq('document_id', documentId);
+
+      if (error) {
+        console.error('Error counting embeddings:', error);
+        return 0;
+      }
+
+      return count || 0;
+    } catch (error) {
+      console.error('Error in countDocumentEmbeddings:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Obtiene estadísticas de embeddings de un proyecto
+   */
+  static async getProjectStats(projectId: string): Promise<{
+    totalEmbeddings: number;
+    totalDocuments: number;
+    averageChunksPerDocument: number;
+  }> {
+    try {
+      // Contar embeddings totales
+      const { count: totalEmbeddings, error: embError } = await supabase
+        .from('document_embeddings')
+        .select('*', { count: 'exact', head: true })
+        .eq('project_id', projectId);
+
+      if (embError) {
+        console.error('Error counting embeddings:', embError);
+      }
+
+      // Contar documentos únicos
+      const { data: uniqueDocs, error: docsError } = await supabase
+        .from('document_embeddings')
+        .select('document_id')
+        .eq('project_id', projectId);
+
+      if (docsError) {
+        console.error('Error counting documents:', docsError);
+      }
+
+      const uniqueDocIds = new Set(uniqueDocs?.map(d => d.document_id) || []);
+      const totalDocuments = uniqueDocIds.size;
+
+      return {
+        totalEmbeddings: totalEmbeddings || 0,
+        totalDocuments,
+        averageChunksPerDocument: totalDocuments > 0 
+          ? (totalEmbeddings || 0) / totalDocuments 
+          : 0,
+      };
+    } catch (error) {
+      console.error('Error getting project stats:', error);
+      return {
+        totalEmbeddings: 0,
+        totalDocuments: 0,
+        averageChunksPerDocument: 0,
+      };
+    }
+  }
+
+  /**
+   * Reindexar un documento (eliminar embeddings antiguos y crear nuevos)
+   */
+  static async reindexDocument(
+    documentId: string,
+    projectId: string,
+    extractedText: string,
+    metadata: Record<string, any> = {}
+  ): Promise<ProcessingResult> {
+    // Eliminar embeddings existentes
+    await this.deleteDocumentEmbeddings(documentId);
+    
+    // Crear nuevos embeddings
+    return this.processDocument(documentId, projectId, extractedText, metadata);
+  }
+}
