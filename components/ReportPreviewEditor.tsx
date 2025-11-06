@@ -556,10 +556,10 @@ export function ReportPreviewEditor({
                   <span>Tienes cambios sin guardar</span>
                 </div>
               )}
-              {!hasChanges && activeTab === 'edit' && (
-                <div className="flex items-center gap-2 text-green-400 text-sm">
+              {!hasChanges && (
+                <div className="flex items-center gap-2 text-blue-400 text-sm">
                   <CheckCircle className="w-4 h-4" />
-                  <span>Todos los cambios guardados</span>
+                  <span>Vista previa lista para guardar</span>
                 </div>
               )}
             </div>
@@ -568,15 +568,14 @@ export function ReportPreviewEditor({
                 onClick={onClose}
                 className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
               >
-                {hasChanges ? 'Descartar Cambios' : 'Cerrar'}
+                Cerrar
               </button>
               <button
                 onClick={handleSave}
-                disabled={!hasChanges}
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors flex items-center gap-2"
               >
                 <Save className="w-4 h-4" />
-                Guardar y Generar Informe
+                {hasChanges ? 'Guardar Cambios y Generar Informe' : 'Guardar y Generar Informe'}
               </button>
             </div>
           </div>

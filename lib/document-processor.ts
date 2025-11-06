@@ -1,52 +1,175 @@
 /**
  * Servicio para procesar y extraer texto de documentos
  * Soporta: PDF, Word, Excel, CSV, imágenes
- * Nota: Procesamiento simplificado en cliente. Para procesamiento avanzado se usa RAG.
+ * Nota: Procesamiento simplificado en cliente. Solo usa APIs disponibles (OpenAI + Supabase)
  */
 
 import * as XLSX from 'xlsx';
 
 export class DocumentProcessor {
   /**
-   * Extrae texto de un PDF (versión simplificada)
-   * Nota: Para PDFs complejos, el texto se extraerá en el servidor
+   * Extrae texto REAL de un PDF usando PDF.js
+   * Si el PDF está escaneado (poco texto), intenta OCR con Tesseract.js
    */
   static async extractTextFromPDF(file: File): Promise<string> {
-    return new Promise((resolve) => {
-      // Por ahora, generamos metadata básica
-      // El procesamiento real de PDF se hará en el backend cuando sea necesario
-      let extractedText = `📄 ARCHIVO PDF: ${file.name}\n`;
-      extractedText += `📊 Tamaño: ${(file.size / 1024).toFixed(2)} KB\n`;
-      extractedText += `📅 Última modificación: ${new Date(file.lastModified).toLocaleString('es-ES')}\n`;
-      extractedText += `\n${'='.repeat(60)}\n`;
-      extractedText += `DOCUMENTO PDF CARGADO\n`;
-      extractedText += `${'='.repeat(60)}\n\n`;
-      extractedText += `Este es un archivo PDF que ha sido cargado al sistema.\n`;
-      extractedText += `El contenido será procesado y estará disponible para búsqueda semántica.\n\n`;
-      extractedText += `Para análisis detallado, utiliza la función de generación de reportes o búsqueda IA.\n`;
-      
-      resolve(extractedText);
+    return new Promise(async (resolve, reject) => {
+      try {
+        console.log(`📄 [PDF] Iniciando extracción de texto de: ${file.name}`);
+        
+        // Importar PDF.js dinámicamente
+        const pdfjsLib = await import('pdfjs-dist');
+        
+        // Configurar worker de PDF.js
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+        
+        // Leer archivo como ArrayBuffer
+        const arrayBuffer = await file.arrayBuffer();
+        
+        // Cargar documento PDF
+        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        
+        console.log(`📊 [PDF] Documento cargado: ${pdf.numPages} páginas`);
+        
+        let fullText = '';
+        
+        // Extraer texto de cada página
+        for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+          const page = await pdf.getPage(pageNum);
+          const textContent = await page.getTextContent();
+          
+          const pageText = textContent.items
+            .map((item: any) => item.str)
+            .join(' ')
+            .trim();
+          
+          if (pageText.length > 0) {
+            if (fullText.length > 0) {
+              fullText += '\n\n';
+            }
+            fullText += pageText;
+          }
+          
+          console.log(`📄 [PDF] Página ${pageNum}/${pdf.numPages} procesada (${pageText.length} caracteres)`);
+        }
+        
+        console.log(`✅ [PDF] Extracción completada: ${fullText.length} caracteres totales`);
+        
+        // Si el texto es muy corto, probablemente es un PDF escaneado - intentar OCR
+        if (fullText.length < 100) {
+          console.warn(`⚠️ [PDF] Texto extraído muy corto (${fullText.length} chars).`);
+          console.log(`🔄 [PDF] Intentando OCR con Tesseract.js...`);
+          
+          try {
+            const ocrText = await this.performOCROnPDF(file, pdf, pdfjsLib);
+            if (ocrText.length > fullText.length) {
+              console.log(`✅ [OCR] Texto mejorado con OCR: ${ocrText.length} caracteres`);
+              resolve(ocrText);
+              return;
+            }
+          } catch (ocrError) {
+            console.error(`❌ [OCR] Error en OCR:`, ocrError);
+          }
+        }
+        
+        resolve(fullText);
+      } catch (error) {
+        console.error('❌ [PDF] Error al extraer texto:', error);
+        
+        // Fallback a metadata básica si falla la extracción
+        const fallbackText = `Archivo: ${file.name} (${(file.size / 1024).toFixed(2)} KB). No se pudo extraer texto automáticamente. El PDF puede ser una imagen escaneada o estar protegido.`;
+        
+        resolve(fallbackText);
+      }
     });
   }
 
   /**
-   * Extrae texto de una imagen (metadata básica)
-   * Nota: OCR completo se procesará cuando sea necesario
+   * Realiza OCR en un PDF usando Tesseract.js
+   */
+  private static async performOCROnPDF(file: File, pdf: any, pdfjsLib: any): Promise<string> {
+    const Tesseract = await import('tesseract.js');
+    let ocrText = '';
+
+    console.log(`🔍 [OCR] Procesando ${pdf.numPages} página(s) con Tesseract...`);
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      try {
+        const page = await pdf.getPage(pageNum);
+        
+        // Renderizar página como imagen
+        const viewport = page.getViewport({ scale: 2.0 });
+        const canvas = document.createElement('canvas');
+        const context = canvas.getContext('2d');
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        await page.render({
+          canvasContext: context,
+          viewport: viewport,
+        }).promise;
+
+        // Convertir canvas a blob
+        const blob = await new Promise<Blob>((resolve) => {
+          canvas.toBlob((blob) => resolve(blob!), 'image/png');
+        });
+
+        // Realizar OCR
+        console.log(`🔄 [OCR] Procesando página ${pageNum}/${pdf.numPages}...`);
+        const { data: { text } } = await Tesseract.recognize(blob, 'spa+eng', {
+          logger: (m: any) => {
+            if (m.status === 'recognizing text') {
+              console.log(`📊 [OCR] Página ${pageNum}: ${Math.round(m.progress * 100)}%`);
+            }
+          },
+        });
+
+        if (text.trim().length > 0) {
+          if (ocrText.length > 0) {
+            ocrText += '\n\n';
+          }
+          ocrText += text.trim();
+          console.log(`✅ [OCR] Página ${pageNum} completada: ${text.length} caracteres`);
+        }
+      } catch (pageError) {
+        console.error(`❌ [OCR] Error en página ${pageNum}:`, pageError);
+      }
+    }
+
+    return ocrText;
+  }
+
+  /**
+   * Extrae texto de una imagen usando Tesseract.js OCR
    */
   static async extractTextFromImage(file: File): Promise<string> {
-    return new Promise((resolve) => {
-      let extractedText = `🖼️ ARCHIVO DE IMAGEN: ${file.name}\n`;
-      extractedText += `📊 Tamaño: ${(file.size / 1024).toFixed(2)} KB\n`;
-      extractedText += `📊 Tipo: ${file.type}\n`;
-      extractedText += `📅 Última modificación: ${new Date(file.lastModified).toLocaleString('es-ES')}\n`;
-      extractedText += `\n${'='.repeat(60)}\n`;
-      extractedText += `IMAGEN CARGADA\n`;
-      extractedText += `${'='.repeat(60)}\n\n`;
-      extractedText += `Esta es una imagen que ha sido cargada al sistema.\n`;
-      extractedText += `La imagen estará disponible como referencia en el análisis.\n\n`;
-      extractedText += `Para extraer texto mediante OCR, utiliza las herramientas de procesamiento avanzado.\n`;
-      
-      resolve(extractedText);
+    return new Promise(async (resolve) => {
+      try {
+        console.log(`🖼️ [Image] Iniciando OCR de imagen: ${file.name}`);
+        
+        const Tesseract = await import('tesseract.js');
+        
+        console.log(`🔄 [OCR] Procesando imagen con Tesseract...`);
+        
+        const { data: { text } } = await Tesseract.recognize(file, 'spa+eng', {
+          logger: (m: any) => {
+            if (m.status === 'recognizing text') {
+              console.log(`📊 [OCR] Progreso: ${Math.round(m.progress * 100)}%`);
+            }
+          },
+        });
+
+        if (text.trim().length > 0) {
+          console.log(`✅ [OCR] Texto extraído de imagen: ${text.length} caracteres`);
+          resolve(text.trim());
+        } else {
+          console.warn(`⚠️ [OCR] No se detectó texto en la imagen`);
+          resolve(`Imagen: ${file.name} (${(file.size / 1024).toFixed(2)} KB). No se detectó texto mediante OCR.`);
+        }
+      } catch (error) {
+        console.error('❌ [OCR] Error al procesar imagen:', error);
+        resolve(`Archivo de imagen: ${file.name} (${(file.size / 1024).toFixed(2)} KB). Error al procesar con OCR.`);
+      }
     });
   }
 
@@ -62,7 +185,7 @@ export class DocumentProcessor {
           const data = e.target?.result;
           const workbook = XLSX.read(data, { type: 'binary' });
           
-          let extractedText = `📊 ARCHIVO EXCEL: ${file.name}\n`;
+          let extractedText = `📊 Archivo Excel: ${file.name}\n`;
           extractedText += `📁 Total de hojas: ${workbook.SheetNames.length}\n\n`;
           
           // Procesar cada hoja
@@ -73,7 +196,7 @@ export class DocumentProcessor {
             const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
             
             extractedText += `${'='.repeat(60)}\n`;
-            extractedText += `📄 HOJA ${index + 1}: "${sheetName}"\n`;
+            extractedText += `Hoja ${index + 1}: "${sheetName}"\n`;
             extractedText += `${'='.repeat(60)}\n\n`;
             
             if (jsonData.length === 0) {
@@ -83,12 +206,12 @@ export class DocumentProcessor {
             
             // Identificar encabezados (primera fila con datos)
             const headers = jsonData[0] || [];
-            extractedText += `📋 Columnas detectadas (${headers.length}): ${headers.map(h => `"${h}"`).join(', ')}\n`;
-            extractedText += `📊 Total de filas de datos: ${jsonData.length - 1}\n\n`;
+            extractedText += `Columnas (${headers.length}): ${headers.map(h => `"${h}"`).join(', ')}\n`;
+            extractedText += `Total de filas: ${jsonData.length - 1}\n\n`;
             
             // Extraer estadísticas básicas de cada columna
             if (headers.length > 0 && jsonData.length > 1) {
-              extractedText += `📈 ANÁLISIS DE COLUMNAS:\n\n`;
+              extractedText += `Análisis de columnas:\n\n`;
               
               headers.forEach((header, colIndex) => {
                 const columnValues = jsonData.slice(1)
@@ -96,7 +219,7 @@ export class DocumentProcessor {
                   .filter(val => val !== undefined && val !== null && val !== '');
                 
                 if (columnValues.length > 0) {
-                  extractedText += `  Columna: "${header}"\n`;
+                  extractedText += `  "${header}":\n`;
                   extractedText += `  - Valores no vacíos: ${columnValues.length}\n`;
                   
                   // Detectar tipo de datos predominante
@@ -130,7 +253,7 @@ export class DocumentProcessor {
             
             // Mostrar primeras filas de datos (máximo 10)
             const rowsToShow = Math.min(10, jsonData.length);
-            extractedText += `📝 MUESTRA DE DATOS (primeras ${rowsToShow} filas):\n\n`;
+            extractedText += `Muestra de datos (primeras ${rowsToShow} filas):\n\n`;
             
             jsonData.slice(0, rowsToShow).forEach((row, rowIndex) => {
               if (rowIndex === 0) {
@@ -149,12 +272,13 @@ export class DocumentProcessor {
           });
           
           extractedText += `${'='.repeat(60)}\n`;
-          extractedText += `✅ Extracción completada exitosamente\n`;
-          extractedText += `📊 Resumen: ${workbook.SheetNames.length} hoja(s) procesada(s)\n`;
+          extractedText += `Extracción completada\n`;
+          extractedText += `Resumen: ${workbook.SheetNames.length} hoja(s) procesada(s)\n`;
           
+          console.log(`✅ [Excel] Extracción completada: ${file.name}`);
           resolve(extractedText);
         } catch (error) {
-          console.error('Error al procesar Excel:', error);
+          console.error('❌ [Excel] Error al procesar:', error);
           reject(new Error('Error al procesar el archivo Excel'));
         }
       };
@@ -173,17 +297,7 @@ export class DocumentProcessor {
    */
   static async extractTextFromWord(file: File): Promise<string> {
     return new Promise((resolve) => {
-      let extractedText = `📝 ARCHIVO WORD: ${file.name}\n`;
-      extractedText += `📊 Formato: ${file.name.endsWith('.docx') ? 'DOCX (Office Open XML)' : 'DOC (Microsoft Word)'}\n`;
-      extractedText += `📊 Tamaño: ${(file.size / 1024).toFixed(2)} KB\n`;
-      extractedText += `📅 Última modificación: ${new Date(file.lastModified).toLocaleString('es-ES')}\n`;
-      extractedText += `\n${'='.repeat(60)}\n`;
-      extractedText += `DOCUMENTO WORD CARGADO\n`;
-      extractedText += `${'='.repeat(60)}\n\n`;
-      extractedText += `Este es un documento Word que ha sido cargado al sistema.\n`;
-      extractedText += `El contenido estará disponible para búsqueda y análisis.\n\n`;
-      extractedText += `Para análisis detallado, utiliza la generación de reportes con IA.\n`;
-      
+      const extractedText = `Archivo Word: ${file.name} (${(file.size / 1024).toFixed(2)} KB). Documento cargado en el sistema.`;
       resolve(extractedText);
     });
   }
@@ -202,7 +316,7 @@ export class DocumentProcessor {
             throw new Error('No se pudo leer el archivo CSV');
           }
 
-          let extractedText = `📊 ARCHIVO CSV: ${file.name}\n`;
+          let extractedText = `Archivo CSV: ${file.name}\n`;
           
           // Detectar delimitador
           const delimiters = [',', ';', '\t', '|'];
@@ -222,12 +336,9 @@ export class DocumentProcessor {
           const lines = csvText.split('\n').filter(line => line.trim().length > 0);
           const headers = lines[0].split(bestDelimiter).map(h => h.trim().replace(/^"|"$/g, ''));
           
-          extractedText += `📋 Columnas detectadas (${headers.length}): ${headers.map(h => `"${h}"`).join(', ')}\n`;
-          extractedText += `📊 Total de filas de datos: ${lines.length - 1}\n`;
-          extractedText += `🔤 Delimitador usado: "${bestDelimiter}"\n`;
-          extractedText += `\n${'='.repeat(60)}\n`;
-          extractedText += `CONTENIDO DEL CSV\n`;
-          extractedText += `${'='.repeat(60)}\n\n`;
+          extractedText += `Columnas (${headers.length}): ${headers.map(h => `"${h}"`).join(', ')}\n`;
+          extractedText += `Total de filas: ${lines.length - 1}\n`;
+          extractedText += `Delimitador: "${bestDelimiter}"\n\n`;
           
           // Mostrar primeras 20 filas
           const rowsToShow = Math.min(20, lines.length);
@@ -242,7 +353,7 @@ export class DocumentProcessor {
           });
 
           if (lines.length > rowsToShow) {
-            extractedText += `\n... (${lines.length - rowsToShow} filas adicionales no mostradas)\n`;
+            extractedText += `\n... (${lines.length - rowsToShow} filas adicionales)\n`;
           }
 
           resolve(extractedText);
@@ -264,40 +375,25 @@ export class DocumentProcessor {
    * Procesa un documento y extrae su contenido
    */
   static async processDocument(file: File, fileType: string): Promise<string> {
-    if (fileType === 'pdf') {
-      return this.extractTextFromPDF(file);
-    } else if (fileType === 'image') {
-      return this.extractTextFromImage(file);
-    } else if (fileType === 'excel') {
-      return this.extractDataFromExcel(file);
-    } else if (fileType === 'word') {
-      return this.extractTextFromWord(file);
-    } else if (fileType === 'csv') {
-      return this.extractDataFromCSV(file);
+    console.log(`📄 [DocumentProcessor] Procesando ${fileType}: ${file.name}`);
+    
+    try {
+      if (fileType === 'pdf') {
+        return await this.extractTextFromPDF(file);
+      } else if (fileType === 'image') {
+        return await this.extractTextFromImage(file);
+      } else if (fileType === 'excel') {
+        return await this.extractDataFromExcel(file);
+      } else if (fileType === 'word') {
+        return await this.extractTextFromWord(file);
+      } else if (fileType === 'csv') {
+        return await this.extractDataFromCSV(file);
+      }
+      
+      return '';
+    } catch (error) {
+      console.error(`❌ [DocumentProcessor] Error procesando ${fileType}:`, error);
+      throw error;
     }
-    
-    return '';
-  }
-
-  /**
-   * Analiza el contenido de un documento y genera un resumen
-   */
-  static async analyzeDocument(content: string, description?: string): Promise<{
-    summary: string;
-    keyPoints: string[];
-    relevantEntities: string[];
-  }> {
-    // Por ahora, retornamos un análisis básico
-    // En producción, podrías usar OpenAI para análisis más avanzado
-    
-    const sentences = content.split(/[.!?]+/).filter(s => s.trim().length > 0);
-    const keyPoints = sentences.slice(0, 5);
-    
-    return {
-      summary: description || `Documento con ${sentences.length} oraciones analizadas.`,
-      keyPoints,
-      relevantEntities: [],
-    };
   }
 }
-

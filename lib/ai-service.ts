@@ -50,39 +50,98 @@ export class AIService {
     // 🔥 NUEVO: Usar RAG para obtener contexto relevante
     let ragContext = '';
     let ragDocuments: Document[] = [];
+    let ragChunksFound = 0;
     
     try {
-      // Generar query basada en el tipo de reporte
-      const reportTypeQueries = {
-        'executive': `análisis ejecutivo general, resumen de hallazgos principales, conclusiones estratégicas, recomendaciones de alto nivel`,
-        'technical': `análisis técnico detallado, especificaciones, implementación, arquitectura, metodología`,
-        'compliance': `cumplimiento normativo, regulaciones, requisitos legales, auditoría, estándares`,
-        'financial': `análisis financiero, estados financieros, métricas, indicadores económicos, presupuesto`,
-      };
+      // 🎯 ESTRATEGIA MEJORADA: Buscar contenido general del proyecto
+      // En lugar de términos abstractos, usamos la descripción del proyecto
+      // que probablemente coincida mejor con el contenido real de los documentos
       
-      const searchQuery = `${reportTypeQueries[options.reportType]} ${options.project.description || ''}`;
+      const projectContext = options.project.description || options.project.name;
+      const documentNames = options.documents.map(d => d.filename).join(' ');
       
-      console.log(`🔍 Buscando contexto relevante con RAG para reporte ${options.reportType}...`);
+      // Query más concreta basada en el proyecto real
+      const searchQuery = `${projectContext} ${documentNames}`.trim() || 
+                         `documento contenido texto información`;
+      
+      console.log(`🔍 [RAG] Buscando contexto relevante para reporte ${options.reportType}...`);
+      console.log(`📋 [RAG] Query de búsqueda: "${searchQuery.substring(0, 100)}..."`);
+      console.log(`📂 [RAG] Proyecto ID: ${options.project.id}`);
+      console.log(`📄 [RAG] Documentos disponibles: ${options.documents.length}`);
       
       const ragResults = await RAGService.searchSimilar(
         searchQuery,
         options.project.id,
         15, // Obtener top 15 chunks más relevantes
-        0.75 // Threshold de similitud
+        0.3 // Threshold REDUCIDO a 0.3 (30% similitud) para ser MUY permisivo
       );
+      
+      ragChunksFound = ragResults.chunks.length;
       
       if (ragResults.chunks.length > 0) {
         ragContext = ragResults.context;
         ragDocuments = ragResults.documents;
-        console.log(`✅ RAG encontró ${ragResults.chunks.length} chunks relevantes de ${ragDocuments.length} documentos`);
+        console.log(`✅ [RAG] ENCONTRÓ ${ragResults.chunks.length} chunks relevantes de ${ragDocuments.length} documentos`);
+        console.log(`📊 [RAG] Longitud del contexto: ${ragContext.length} caracteres`);
+        console.log(`📎 [RAG] Documentos fuente: ${ragDocuments.map(d => d.filename).join(', ')}`);
+        
+        // Log primer chunk para debugging
+        if (ragResults.chunks[0]) {
+          const firstChunk = ragResults.chunks[0];
+          console.log(`🔍 [RAG] Primer chunk (similarity ${firstChunk.similarity.toFixed(3)}): "${firstChunk.chunk_text.substring(0, 200)}"`);
+        }
       } else {
-        console.log(`⚠️ RAG no encontró contexto relevante, usando método tradicional`);
+        console.warn(`⚠️ [RAG] NO encontró contexto relevante con threshold 0.3`);
+        console.log(`💡 [RAG] Posibles causas:`);
+        console.log(`   1. La migración SQL NO ha sido aplicada (match_documents necesita SECURITY DEFINER)`);
+        console.log(`   2. Los embeddings pueden no estar generados aún`);
+        console.log(`   3. Query de búsqueda no coincide con contenido del documento`);
       }
     } catch (ragError) {
-      console.error('Error en búsqueda RAG, continuando con método tradicional:', ragError);
+      console.error('❌ [RAG] Error en búsqueda RAG, continuando con método tradicional:', ragError);
     }
 
-    // Preparar documentos para análisis (método tradicional como fallback)
+    // 🎯 DECISIÓN CRÍTICA: Priorizar RAG sobre extracted_text
+    // Si RAG encontró contenido, usaremos ESO como fuente principal de verdad
+    
+    console.log(`\n═══════════════════════════════════════════════════════`);
+    console.log(`🤖 [AI Service] Preparando generación de informe...`);
+    console.log(`📊 [AI Service] RAG chunks encontrados: ${ragChunksFound}`);
+    console.log(`📄 [AI Service] Documentos totales: ${options.documents.length}`);
+    
+    // Si no hay documentos en absoluto, usar generación básica
+    if (options.documents.length === 0) {
+      console.log(`⚠️ [AI Service] Sin documentos - usando generación básica`);
+      return this.generateBasicReport(options);
+    }
+    
+    // Si RAG encontró contenido REAL, ese es nuestro contenido principal
+    // No necesitamos extracted_text porque RAG ya lo procesó
+    if (ragChunksFound > 0) {
+      console.log(`✅ [AI Service] USANDO RAG como fuente principal (${ragChunksFound} chunks)`);
+      console.log(`📝 [AI Service] El informe se basará en contenido REAL del RAG`);
+      
+      // Crear contextos básicos de documentos solo para referencia
+      // Pero el contenido REAL viene del RAG
+      const documentContexts = options.documents.map(doc => ({
+        id: doc.id,
+        filename: doc.filename,
+        description: doc.description || '',
+        type: doc.file_type,
+        content: `Documento referenciado: ${doc.filename} (${doc.file_type.toUpperCase()})`,
+      }));
+      
+      const systemPrompt = this.getSystemPrompt(options.reportType, options.project.type);
+      const userPrompt = this.getUserPrompt(options.project, documentContexts, ragContext, ragDocuments);
+      
+      console.log(`📤 [AI Service] Enviando request a OpenAI con RAG context...`);
+      
+      return await this.callOpenAI(systemPrompt, userPrompt, options);
+    }
+    
+    // Si NO hay RAG, intentar usar extracted_text como fallback
+    console.log(`⚠️ [AI Service] Sin RAG - intentando usar extracted_text...`);
+    
     let documentContexts = options.documents
       .filter(doc => doc.processing_status === 'completed')
       .map(doc => ({
@@ -92,29 +151,35 @@ export class AIService {
         type: doc.file_type,
         content: doc.extracted_text 
           ? doc.extracted_text.substring(0, 5000)
-          : (doc.description || `Documento ${doc.filename} (${doc.file_type.toUpperCase()}, ${(doc.file_size / 1024).toFixed(2)} KB). ${doc.description ? doc.description : 'Sin contenido extraído disponible.'}`),
+          : (doc.description || `Documento ${doc.filename} (${doc.file_type.toUpperCase()}, ${(doc.file_size / 1024).toFixed(2)} KB).`),
       }));
-
-    // Si no hay documentos, usar generación básica
-    if (documentContexts.length === 0 && options.documents.length === 0) {
-      return this.generateBasicReport(options);
-    }
 
     // Si hay documentos pero ninguno tiene texto extraído, usar información básica
     if (documentContexts.length === 0 && options.documents.length > 0) {
+      console.log(`⚠️ [AI Service] Sin extracted_text - usando metadata básica`);
       documentContexts = options.documents.map(doc => ({
         id: doc.id,
         filename: doc.filename,
         description: doc.description || '',
         type: doc.file_type,
-        content: doc.description || `Documento ${doc.filename} (${doc.file_type.toUpperCase()}) sin contenido extraído.`,
+        content: doc.description || `Documento ${doc.filename} (${doc.file_type.toUpperCase()}) - Sin contenido procesado. Considera procesar el documento con OCR o extracción de texto.`,
       }));
     }
 
+    console.log(`📤 [AI Service] Enviando request a OpenAI con fallback context...`);
+    
     const systemPrompt = this.getSystemPrompt(options.reportType, options.project.type);
     const userPrompt = this.getUserPrompt(options.project, documentContexts, ragContext, ragDocuments);
 
+    return await this.callOpenAI(systemPrompt, userPrompt, options);
+  }
+
+  private static async callOpenAI(systemPrompt: string, userPrompt: string, options: AIPromptOptions) {
     try {
+      console.log(`🌐 [OpenAI] Iniciando llamada a API...`);
+      console.log(`📏 [OpenAI] System prompt length: ${systemPrompt.length} chars`);
+      console.log(`📏 [OpenAI] User prompt length: ${userPrompt.length} chars`);
+      
       const response = await fetch(this.apiUrl, {
         method: 'POST',
         headers: {
@@ -134,6 +199,7 @@ export class AIService {
 
       if (!response.ok) {
         const error = await response.json();
+        console.error(`❌ [OpenAI] Error response:`, error);
         throw new Error(error.error?.message || 'Error al generar el informe con IA');
       }
 
@@ -144,9 +210,13 @@ export class AIService {
         throw new Error('No se recibió contenido de la IA');
       }
 
+      console.log(`✅ [OpenAI] Respuesta recibida (${aiContent.length} chars)`);
+      console.log(`═══════════════════════════════════════════════════════\n`);
+
       return this.parseAIResponse(aiContent);
     } catch (error) {
-      console.error('Error en generación IA:', error);
+      console.error('❌ [AI Service] Error en generación IA, usando fallback:', error);
+      console.log(`═══════════════════════════════════════════════════════\n`);
       return this.generateBasicReport(options);
     }
   }
@@ -174,6 +244,22 @@ Tu tarea es analizar CONTENIDO REAL de documentos y generar un informe BASADO EN
 5. ❌ PROHIBIDO usar frases vagas como "se observa que" sin evidencia concreta
 6. ✅ OBLIGATORIO cada hallazgo debe ser verificable contra el contenido real
 7. ✅ OBLIGATORIO si hay contexto RAG, ese es tu ÚNICA fuente de verdad
+8. ❌ PROHIBIDO ABSOLUTAMENTE decir "no se pudo extraer", "falta contenido", "no hay acceso al texto"
+   - Si recibes contexto RAG, ES PORQUE HAY CONTENIDO REAL
+   - NO menciones limitaciones técnicas o problemas de extracción
+   - ENFÓCATE en analizar el contenido que SÍ está disponible
+9. ✅ OBLIGATORIO ser PROFESIONAL y CONFIABLE en el tono
+   - NO uses lenguaje de disculpa o limitación
+   - SÍ presenta hallazgos con autoridad y certeza
+   - Estructura el informe como un documento ejecutivo de alta calidad
+10. ❌ PROHIBIDO incluir IDs técnicos, UUIDs, o información de metadata interna
+   - NO incluyas IDs de chunks (ej: "ID: 93118262-8196-4e87-8d0e-1930fa39f0bc")
+   - NO incluyas términos técnicos como "chunk", "embedding", "similarity score"
+   - El informe debe leer como si fuera escrito por un analista humano experto
+11. ❌ PROHIBIDO truncar o cortar descripciones con "..." al final
+   - Las descripciones SIEMPRE deben ser completas y terminadas correctamente
+   - Si una descripción es larga, resúmela profesionalmente, pero NO la cortes a mitad
+   - Termina cada descripción con un punto final y cierre completo
 
 ═══════════════════════════════════════════════════════════════════════════════
 
@@ -201,27 +287,27 @@ ${template.structure.map((section, idx) => `${idx + 1}. ${section}`).join('\n')}
 
 Genera tu respuesta como un objeto JSON con la siguiente estructura:
 {
-  "executive_summary": "Un resumen completo BASADO EN EL CONTENIDO REAL proporcionado. Debe incluir: ${template.structure.join(', ')}. CITA datos específicos del contexto.",
+  "executive_summary": "Un resumen completo BASADO EN EL CONTENIDO REAL proporcionado. Debe incluir: ${template.structure.join(', ')}. CITA datos específicos del contexto. ⚠️ NO incluir IDs técnicos, UUIDs, o terminología de sistema. ⚠️ NO truncar con '...', COMPLETAR el resumen con un cierre profesional.",
   "document_analysis": [
     {
       "title": "Título específico del análisis basado en contenido real",
-      "content": "Análisis detallado con CITAS TEXTUALES entre comillas del contenido real, números específicos, nombres exactos, fechas concretas...",
+      "content": "Análisis detallado con CITAS TEXTUALES entre comillas del contenido real, números específicos, nombres exactos, fechas concretas. ⚠️ COMPLETAR el contenido sin truncar con '...', terminar con punto final y cierre profesional. ⚠️ NO incluir IDs de chunks ni metadata técnica.",
       "document_ids": ["doc-id-1", "doc-id-2"]
     }
   ],
   "key_findings": [
     {
       "title": "Título del hallazgo basado en evidencia concreta",
-      "description": "Descripción con EVIDENCIA DIRECTA: citas entre comillas, números exactos, referencias específicas del contenido. Ejemplo: 'En el documento X se menciona: [cita textual]' o 'Los datos muestran un valor de $XXX en la columna Y'",
+      "description": "Descripción COMPLETA con EVIDENCIA DIRECTA: citas entre comillas, números exactos, referencias específicas del contenido. Ejemplo: 'En el documento X se menciona: [cita textual]' o 'Los datos muestran un valor de $XXX en la columna Y'. ⚠️ COMPLETAR la descripción sin truncar con '...', asegurarse de que termine correctamente con punto final. ⚠️ NO incluir IDs de chunks (ej: ID: 93118262-...) ni terminología técnica.",
       "severity": "crítica|alta|media|baja",
       "document_ids": ["doc-id-1"]
     }
   ],
-  "conclusions": "Conclusiones completas basadas ÚNICAMENTE en el análisis del contenido real proporcionado. Menciona hallazgos específicos encontrados en el contenido.",
+  "conclusions": "Conclusiones completas basadas ÚNICAMENTE en el análisis del contenido real proporcionado. Menciona hallazgos específicos encontrados en el contenido. ⚠️ COMPLETAR sin truncar, terminar correctamente. ⚠️ NO incluir IDs técnicos.",
   "recommendations": [
     {
       "title": "Título de la recomendación basada en hallazgos reales",
-      "description": "Descripción que SE DERIVA DIRECTAMENTE de los hallazgos en el contenido real...",
+      "description": "Descripción COMPLETA que SE DERIVA DIRECTAMENTE de los hallazgos en el contenido real. ⚠️ NO truncar con '...', terminar profesionalmente. ⚠️ NO incluir metadata técnica.",
       "priority": "alta|media|baja",
       "actionable_steps": ["Paso 1 específico basado en el contenido", "Paso 2 accionable basado en hallazgos reales", "Paso 3 con métricas del contenido"]
     }
@@ -279,7 +365,7 @@ IMPORTANTE:
 📊 INSTRUCCIONES ESPECIALES PARA ANÁLISIS DE DATOS TABULARES (EXCEL):
 
 Los siguientes documentos contienen datos estructurados en formato de hojas de cálculo:
-${excelDocs.map(doc => `- ${doc.filename} (ID: ${doc.id})`).join('\n')}
+${excelDocs.map(doc => `- ${doc.filename}`).join('\n')}
 
 Al analizar estos archivos Excel, presta especial atención a:
 1. **Estructura de Datos**: Identifica columnas, tipos de datos (numéricos, texto, fechas)
@@ -315,7 +401,7 @@ Los siguientes fragmentos contienen el contenido más relevante de los documento
 ${ragContext}
 
 📋 Documentos de origen del contexto RAG:
-${ragDocuments.map(doc => `- ${doc.filename} (ID: ${doc.id}) - ${doc.file_type.toUpperCase()}`).join('\n')}
+${ragDocuments.map(doc => `- ${doc.filename} - ${doc.file_type.toUpperCase()}`).join('\n')}
 
 ═══════════════════════════════════════════════════════════════════════════════
 ⚠️ IMPORTANTE - LEE ESTO CUIDADOSAMENTE:
@@ -341,31 +427,113 @@ EJEMPLO DE ANÁLISIS CORRECTO:
 `;
     }
 
-    // Si NO hay contexto RAG pero hay documentos, mostrar advertencia
-    let noRagWarning = '';
+    // Si NO hay contexto RAG pero hay documentos, verificar extracted_text
+    let modeWarning = '';
+    const hasExtractedText = documents.some(doc => doc.content && doc.content.length > 200);
+    
     if (!hasRagContext && documents.length > 0) {
-      noRagWarning = `
+      if (hasExtractedText) {
+        modeWarning = `
 
-⚠️ ADVERTENCIA: No se encontró contenido RAG relevante para este análisis.
-Esto puede deberse a que:
-1. Los documentos están siendo procesados aún
-2. Los documentos no contienen texto extraíble (imágenes sin OCR, PDFs escaneados)
-3. El texto es muy corto (<100 caracteres)
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                   ⚠️  MODO TEXTO EXTRAÍDO (Sin RAG) ⚠️                        ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
 
-Por favor, genera un análisis básico basado en los metadatos disponibles de los documentos.
+✅ CONTENIDO DISPONIBLE: Se encontró texto extraído de los documentos.
+
+⚠️ NOTA: La búsqueda RAG no retornó resultados (posiblemente la migración SQL no se aplicó),
+pero TIENES ACCESO al contenido extraído directamente.
+
+🎯 INSTRUCCIONES PARA ESTE MODO:
+
+**IMPORTANTE**: Aunque no uses RAG, TIENES contenido real para analizar.
+- Analiza el texto proporcionado en la sección "Vista previa del contenido"
+- Extrae información específica, nombres, fechas, conceptos del texto
+- NO digas "no se pudo extraer" o "contenido insuficiente"
+- Genera un análisis PROFESIONAL basado en el texto disponible
+- Usa lenguaje de EXPERTO, no de limitación
+
+El informe debe ser como si un analista experto lo hubiera escrito después de leer
+el documento completo. Sin mencionar problemas técnicos o limitaciones.
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+`;
+      } else {
+        modeWarning = `
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                            ⚠️  MODO LIMITADO ⚠️                                ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+❌ NO se encontró contenido procesable para este análisis.
+
+Posibles razones:
+1. Los documentos son imágenes sin OCR procesado
+2. Los PDFs están escaneados y no tienen texto extraíble
+3. Error en la extracción de texto
+
+⚠️ LIMITACIÓN: Solo tienes acceso a METADATA de documentos (nombre, tipo, tamaño).
+
+🔧 INSTRUCCIONES:
+- Genera un informe BÁSICO indicando que los documentos necesitan procesamiento
+- NO inventes contenido o análisis ficticios
+- Recomienda aplicar OCR o procesamiento de texto
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+`;
+      }
+    } else if (hasRagContext) {
+      modeWarning = `
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                       ✅  MODO RAG ACTIVADO ✅                                 ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+✅ CONTENIDO REAL DISPONIBLE: Se encontraron ${ragDocuments.length} documento(s) con embeddings procesados.
+
+Este es el escenario IDEAL para generar un informe de alta calidad basado en CONTENIDO REAL.
+
+🎯 INSTRUCCIONES ESPECÍFICAS PARA GENERAR INFORME DE CALIDAD:
+
+**RESUMEN EJECUTIVO**:
+- Identifica el tema principal del documento basado en el contenido RAG
+- Menciona hallazgos clave con datos específicos
+- Usa lenguaje profesional y confiado
+- Incluye contexto relevante del proyecto
+- NO menciones limitaciones técnicas o problemas de extracción
+
+**ANÁLISIS DE DOCUMENTOS**:
+- Para cada documento, identifica su propósito y contenido principal
+- Cita secciones, capítulos, o partes específicas mencionadas en el RAG
+- Extrae temas clave, conceptos importantes, datos relevantes
+- Relaciona el contenido con el objetivo del proyecto
+
+**HALLAZGOS PRINCIPALES**:
+- Identifica insights concretos del contenido
+- Cita evidencia específica (nombres, fechas, números, conceptos)
+- Categoriza por severidad según su importancia para el proyecto
+- Cada hallazgo debe ser accionable o informativo
+
+**RECOMENDACIONES**:
+- Deriva acciones basadas en los hallazgos del contenido real
+- Proporciona pasos específicos y medibles
+- Prioriza según impacto y urgencia
+- Relaciona con el contexto del proyecto
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
 `;
     }
 
     return `Analiza los siguientes documentos para el proyecto "${project.name}" (tipo ${project.type}).
 
-Descripción del Proyecto: ${project.description || 'No se proporcionó contexto adicional.'}${excelInstructions}${ragSection}${noRagWarning}
+Descripción del Proyecto: ${project.description || 'No se proporcionó contexto adicional.'}${modeWarning}${excelInstructions}${ragSection}
 
 ${!hasRagContext ? `
 Documentos disponibles (información de metadata):
 ${documents.map((doc, idx) => {
   const isExcel = doc.type === 'excel' || doc.filename.toLowerCase().endsWith('.xlsx') || doc.filename.toLowerCase().endsWith('.xls');
   return `
-Documento ${idx + 1} (ID: ${doc.id}):
+Documento ${idx + 1}:
 - Nombre del archivo: ${doc.filename}
 - Tipo: ${doc.type}${isExcel ? ' 📊 (EXCEL - Datos Tabulares)' : ''}
 - Descripción: ${doc.description || 'Ninguna'}

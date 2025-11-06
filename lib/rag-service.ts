@@ -117,10 +117,43 @@ export class RAGService {
     threshold: number = 0.78
   ): Promise<SearchResult> {
     try {
+      console.log(`\n╔════════════════════════════════════════════════════════════════════╗`);
+      console.log(`║              🔍 RAG SERVICE - BÚSQUEDA DETALLADA                   ║`);
+      console.log(`╚════════════════════════════════════════════════════════════════════╝`);
+      console.log(`📋 Query: "${query.substring(0, 100)}..."`);
+      console.log(`🆔 Project ID: ${projectId}`);
+      console.log(`📊 Threshold: ${threshold}`);
+      console.log(`🔢 Limit: ${limit}`);
+      
+      // Primero, verificar cuántos embeddings existen en el proyecto
+      const { count: totalEmbeddings, error: countError } = await supabase
+        .from('document_embeddings')
+        .select('*', { count: 'exact', head: true })
+        .eq('project_id', projectId);
+      
+      console.log(`📦 Total embeddings en proyecto: ${totalEmbeddings || 0}`);
+      
+      if (countError) {
+        console.error(`❌ Error al contar embeddings:`, countError);
+      }
+      
+      if (!totalEmbeddings || totalEmbeddings === 0) {
+        console.warn(`⚠️ NO hay embeddings en la base de datos para este proyecto`);
+        return {
+          chunks: [],
+          documents: [],
+          context: '',
+        };
+      }
+
       // Generar embedding para la query
+      console.log(`⏳ Generando embedding para la query...`);
       const queryEmbedding = await EmbeddingService.generateEmbedding(query);
+      console.log(`✅ Embedding generado: ${queryEmbedding.embedding.length} dimensiones`);
+      console.log(`📝 Tokens usados: ${queryEmbedding.tokens}`);
 
       // Buscar chunks similares usando la función de Supabase
+      console.log(`⏳ Llamando a RPC match_documents...`);
       const { data: matches, error } = await supabase.rpc('match_documents', {
         query_embedding: queryEmbedding.embedding,
         match_threshold: threshold,
@@ -129,29 +162,73 @@ export class RAGService {
       });
 
       if (error) {
-        console.error('Error searching documents:', error);
+        console.error(`❌ Error en RPC match_documents:`, error);
+        console.error(`   Código: ${error.code}`);
+        console.error(`   Mensaje: ${error.message}`);
+        console.error(`   Detalles: ${error.details}`);
+        console.error(`   Hint: ${error.hint}`);
         throw error;
       }
 
+      console.log(`📊 RPC retornó: ${matches ? matches.length : 0} matches`);
+      
       if (!matches || matches.length === 0) {
+        console.warn(`⚠️ NO se encontraron matches con threshold ${threshold}`);
+        console.warn(`💡 Intentando query directa sin RPC para diagnosticar...`);
+        
+        // Query de diagnóstico: obtener algunos embeddings para verificar
+        const { data: sampleEmbeddings, error: sampleError } = await supabase
+          .from('document_embeddings')
+          .select('id, document_id, chunk_text, chunk_index')
+          .eq('project_id', projectId)
+          .limit(3);
+        
+        if (sampleError) {
+          console.error(`❌ Error en query de diagnóstico:`, sampleError);
+        } else if (sampleEmbeddings) {
+          console.log(`🔍 Muestra de embeddings en DB (primeros 3):`);
+          sampleEmbeddings.forEach((emb, idx) => {
+            console.log(`   ${idx + 1}. ID: ${emb.id}, Doc: ${emb.document_id}, Chunk: ${emb.chunk_index}`);
+            console.log(`      Texto: "${emb.chunk_text.substring(0, 100)}..."`);
+          });
+        }
+        
+        console.log(`╚════════════════════════════════════════════════════════════════════╝\n`);
+        
         return {
           chunks: [],
           documents: [],
           context: '',
         };
       }
+      
+      console.log(`✅ Encontrados ${matches.length} chunks relevantes!`);
+      if (matches.length > 0) {
+        console.log(`📊 Mejor similitud: ${matches[0].similarity.toFixed(4)}`);
+        console.log(`📊 Peor similitud: ${matches[matches.length - 1].similarity.toFixed(4)}`);
+      }
 
       // Obtener IDs únicos de documentos
       const documentIds = [...new Set(matches.map((m: any) => m.document_id))];
+      console.log(`📄 Documentos únicos encontrados: ${documentIds.length}`);
+      console.log(`   IDs: ${documentIds.join(', ')}`);
 
       // Obtener información completa de los documentos
+      console.log(`⏳ Obteniendo información de documentos...`);
       const { data: documents, error: docsError } = await supabase
         .from('documents')
         .select('*')
         .in('id', documentIds);
 
       if (docsError) {
-        console.error('Error fetching documents:', docsError);
+        console.error(`❌ Error al obtener documentos:`, docsError);
+      } else {
+        console.log(`✅ Documentos obtenidos: ${documents?.length || 0}`);
+        if (documents) {
+          documents.forEach(doc => {
+            console.log(`   - ${doc.filename} (${doc.file_type})`);
+          });
+        }
       }
 
       // Crear mapa de documentos para fácil acceso
@@ -170,7 +247,10 @@ export class RAGService {
       }));
 
       // Generar contexto consolidado
+      console.log(`📝 Construyendo contexto consolidado...`);
       const context = this.buildContext(chunks, documentsMap);
+      console.log(`✅ Contexto construido: ${context.length} caracteres`);
+      console.log(`╚════════════════════════════════════════════════════════════════════╝\n`);
 
       return {
         chunks,
@@ -178,13 +258,19 @@ export class RAGService {
         context,
       };
     } catch (error) {
-      console.error('Error in similarity search:', error);
+      console.error('❌ [RAG Service] Error crítico en búsqueda de similitud:', error);
+      if (error instanceof Error) {
+        console.error(`   Mensaje: ${error.message}`);
+        console.error(`   Stack: ${error.stack}`);
+      }
+      console.log(`╚════════════════════════════════════════════════════════════════════╝\n`);
       throw error;
     }
   }
 
   /**
    * Construye contexto consolidado a partir de chunks
+   * NO incluye IDs de chunks para evitar contaminar el informe
    */
   private static buildContext(
     chunks: DocumentChunk[],
@@ -207,13 +293,17 @@ export class RAGService {
       const document = documentsMap.get(documentId);
       
       if (document) {
-        context += `\n\n--- Documento: ${document.filename} ---\n`;
+        context += `\n\n═══════════════════════════════════════════════════════════\n`;
+        context += `📄 Documento: ${document.filename} (${document.file_type.toUpperCase()})\n`;
+        context += `═══════════════════════════════════════════════════════════\n`;
         
         // Ordenar chunks por índice
         docChunks.sort((a, b) => a.chunk_index - b.chunk_index);
         
         for (const chunk of docChunks) {
-          context += `\n[Relevancia: ${(chunk.similarity * 100).toFixed(1)}%]\n`;
+          // ⚠️ NO incluir IDs de chunks - solo el contenido real
+          // Solo mostrar relevancia para contexto del AI
+          context += `\n[Fragmento con ${(chunk.similarity * 100).toFixed(1)}% de relevancia]\n`;
           context += chunk.chunk_text;
           context += '\n';
         }

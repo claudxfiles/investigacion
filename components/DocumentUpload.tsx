@@ -131,11 +131,27 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
         const fileExt = file.name.split('.').pop();
         const fileName = `${projectId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
 
+        // Subir archivo con content type explícito
         const { error: uploadError } = await supabase.storage
           .from('documents')
-          .upload(fileName, file);
+          .upload(fileName, file, {
+            contentType: file.type || 'application/octet-stream',
+            upsert: false
+          });
 
-        if (uploadError) throw uploadError;
+        if (uploadError) {
+          // Dar mensaje más claro si es problema de MIME type
+          if (uploadError.message.includes('mime type') || uploadError.message.includes('not supported')) {
+            throw new Error(
+              `❌ Tipo de archivo no permitido: ${file.type}\n\n` +
+              `📋 Archivo: ${file.name}\n\n` +
+              `🔧 SOLUCIÓN: Ve a Supabase Dashboard → Storage → documents → Configuration\n` +
+              `y deja el campo "Allowed MIME types" VACÍO para permitir todos los tipos.\n\n` +
+              `📖 Ver guía completa: FIX_EXCEL_UPLOAD.md`
+            );
+          }
+          throw uploadError;
+        }
 
         const fileType = getFileType(file);
         let extractedText = description || '';
@@ -172,9 +188,17 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
         if (insertError) throw insertError;
 
         // Procesar con RAG si hay texto extraído y OpenAI está configurado
+        console.log(`\n═══════════════════════════════════════════════════════`);
+        console.log(`📝 [DocumentUpload] Verificando condiciones para RAG...`);
+        console.log(`🔑 [DocumentUpload] OpenAI Key presente: ${!!openaiKey}`);
+        console.log(`📄 [DocumentUpload] Texto extraído: ${extractedText?.length || 0} caracteres`);
+        console.log(`📄 [DocumentUpload] Documento insertado: ${!!insertedDoc}`);
+        
         if (openaiKey && extractedText && extractedText.length > 100 && insertedDoc) {
+          console.log(`✅ [DocumentUpload] Todas las condiciones cumplidas, generando embeddings...`);
+          console.log(`📄 [DocumentUpload] Primeros 200 chars: "${extractedText.substring(0, 200)}..."`);
+          
           try {
-            console.log(`Generando embeddings para documento: ${file.name}`);
             const ragResult = await RAGService.processDocument(
               insertedDoc.id,
               projectId,
@@ -187,15 +211,31 @@ export function DocumentUpload({ projectId, onClose, onSuccess }: DocumentUpload
             );
             
             if (ragResult.success) {
-              console.log(`✅ RAG procesado: ${ragResult.chunksCreated} chunks creados para ${file.name}`);
+              console.log(`✅ [DocumentUpload] RAG procesado exitosamente`);
+              console.log(`📊 [DocumentUpload] Chunks creados: ${ragResult.chunksCreated}`);
+              console.log(`📋 [DocumentUpload] Document ID: ${insertedDoc.id}`);
+              console.log(`📂 [DocumentUpload] Project ID: ${projectId}`);
+              
+              // Verificar que se guardaron
+              const count = await RAGService.countDocumentEmbeddings(insertedDoc.id);
+              console.log(`🔍 [DocumentUpload] Verificación: ${count} embeddings guardados en DB`);
             } else {
-              console.warn(`⚠️ RAG no procesado para ${file.name}: ${ragResult.error}`);
+              console.warn(`⚠️ [DocumentUpload] RAG no procesado para ${file.name}`);
+              console.warn(`❌ [DocumentUpload] Error: ${ragResult.error}`);
             }
           } catch (ragError) {
-            console.error('Error en procesamiento RAG:', ragError);
+            console.error('❌ [DocumentUpload] Error en procesamiento RAG:', ragError);
             // No fallar la subida si RAG falla
           }
+        } else {
+          console.warn(`⚠️ [DocumentUpload] No se generaron embeddings porque:`);
+          if (!openaiKey) console.warn(`   - Falta OpenAI API Key`);
+          if (!extractedText) console.warn(`   - No hay texto extraído`);
+          if (extractedText && extractedText.length <= 100) console.warn(`   - Texto muy corto (${extractedText.length} chars, mínimo 100)`);
+          if (!insertedDoc) console.warn(`   - Documento no insertado en DB`);
         }
+        
+        console.log(`═══════════════════════════════════════════════════════\n`);
       }
 
       onSuccess();

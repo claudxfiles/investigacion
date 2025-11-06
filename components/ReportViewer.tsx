@@ -1,18 +1,23 @@
 'use client';
 
 import { useState } from 'react';
-import { X, Download, FileText, AlertTriangle, CheckCircle2, TrendingUp, FileDown } from 'lucide-react';
+import { X, Download, FileText, AlertTriangle, CheckCircle2, TrendingUp, FileDown, Edit2 } from 'lucide-react';
 import { Report } from '@/types';
 import { PDFExportService } from '@/lib/pdf-export';
+import { ReportPreviewEditor } from './ReportPreviewEditor';
+import { supabase } from '@/lib/supabase';
 
 interface ReportViewerProps {
   report: Report;
   projectName?: string;
   onClose: () => void;
+  onUpdate?: () => void;
 }
 
-export function ReportViewer({ report, projectName, onClose }: ReportViewerProps) {
+export function ReportViewer({ report, projectName, onClose, onUpdate }: ReportViewerProps) {
   const [showFiscaliaForm, setShowFiscaliaForm] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [fiscaliaInfo, setFiscaliaInfo] = useState({
     fiscal: '',
     caso: '',
@@ -96,6 +101,51 @@ export function ReportViewer({ report, projectName, onClose }: ReportViewerProps
     setShowFiscaliaForm(false);
   };
 
+  const handleSaveEdits = async (editedData: any) => {
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from('reports')
+        .update({
+          executive_summary: editedData.executive_summary,
+          document_analysis: editedData.document_analysis,
+          key_findings: editedData.key_findings,
+          conclusions: editedData.conclusions,
+          recommendations: editedData.recommendations,
+        })
+        .eq('id', report.id);
+
+      if (error) throw error;
+
+      setShowEditor(false);
+      if (onUpdate) onUpdate();
+      onClose();
+    } catch (err: any) {
+      alert(err.message || 'Error al guardar cambios');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Si se está editando, mostrar el editor
+  if (showEditor) {
+    return (
+      <ReportPreviewEditor
+        reportData={{
+          executive_summary: report.executive_summary,
+          document_analysis: report.document_analysis,
+          key_findings: report.key_findings,
+          conclusions: report.conclusions,
+          recommendations: report.recommendations,
+        }}
+        reportTitle={report.title}
+        reportType={report.report_type}
+        onClose={() => setShowEditor(false)}
+        onSave={handleSaveEdits}
+      />
+    );
+  }
+
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
       <div className="bg-slate-800 rounded-xl max-w-5xl w-full max-h-[90vh] overflow-hidden border border-slate-700 flex flex-col">
@@ -115,6 +165,13 @@ export function ReportViewer({ report, projectName, onClose }: ReportViewerProps
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowEditor(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+            >
+              <Edit2 className="w-4 h-4" />
+              Editar
+            </button>
             <button
               onClick={handleExportPDF}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
@@ -145,7 +202,7 @@ export function ReportViewer({ report, projectName, onClose }: ReportViewerProps
               <h3 className="text-xl font-bold text-white">Resumen Ejecutivo</h3>
             </div>
             <div className="bg-slate-900 rounded-lg p-6 border border-slate-700">
-              <p className="text-slate-300 leading-relaxed">{report.executive_summary}</p>
+              <p className="text-slate-300 leading-relaxed whitespace-pre-wrap">{report.executive_summary}</p>
             </div>
           </section>
 
@@ -160,10 +217,7 @@ export function ReportViewer({ report, projectName, onClose }: ReportViewerProps
                   <h4 className="text-lg font-semibold text-white mb-3">
                     {idx + 1}. {section.title}
                   </h4>
-                  <p className="text-slate-300 mb-4 leading-relaxed">{section.content}</p>
-                  <div className="text-sm text-slate-400 bg-slate-800 rounded px-3 py-2">
-                    <span className="font-medium">Referencias de Fuente:</span> {section.document_references.length} documento(s)
-                  </div>
+                  <p className="text-slate-300 mb-4 leading-relaxed whitespace-pre-wrap">{section.content}</p>
                 </div>
               ))}
             </div>
@@ -185,10 +239,7 @@ export function ReportViewer({ report, projectName, onClose }: ReportViewerProps
                       {getSeverityLabel(finding.severity)}
                     </span>
                   </div>
-                  <p className="text-slate-300 mb-4 leading-relaxed">{finding.description}</p>
-                  <div className="text-sm text-slate-400 bg-slate-800 rounded px-3 py-2">
-                    <span className="font-medium">Referenciado en:</span> {finding.document_references.length} documento(s)
-                  </div>
+                  <p className="text-slate-300 mb-4 leading-relaxed whitespace-pre-wrap">{finding.description}</p>
                 </div>
               ))}
             </div>
@@ -200,7 +251,7 @@ export function ReportViewer({ report, projectName, onClose }: ReportViewerProps
               <h3 className="text-xl font-bold text-white">Conclusiones</h3>
             </div>
             <div className="bg-slate-900 rounded-lg p-6 border border-slate-700">
-              <p className="text-slate-300 leading-relaxed">{report.conclusions}</p>
+              <p className="text-slate-300 leading-relaxed whitespace-pre-wrap">{report.conclusions}</p>
             </div>
           </section>
 
@@ -220,7 +271,7 @@ export function ReportViewer({ report, projectName, onClose }: ReportViewerProps
                       Prioridad {getPriorityLabel(rec.priority)}
                     </span>
                   </div>
-                  <p className="text-slate-300 mb-4 leading-relaxed">{rec.description}</p>
+                  <p className="text-slate-300 mb-4 leading-relaxed whitespace-pre-wrap">{rec.description}</p>
                   <div className="bg-slate-800 rounded p-4">
                     <p className="text-sm font-medium text-slate-300 mb-2">Pasos Accionables:</p>
                     <ol className="space-y-2">

@@ -155,26 +155,6 @@ export class PDFExportService {
       doc.setFontSize(10);
       doc.setFont('helvetica', 'normal');
 
-      // Tabla de Hallazgos
-      const findingsData = report.key_findings.map((finding, idx) => [
-        `${idx + 1}`,
-        finding.title,
-        this.getSeverityLabel(finding.severity),
-        finding.description.substring(0, 100) + (finding.description.length > 100 ? '...' : ''),
-      ]);
-
-      autoTable(doc, {
-        startY: yPosition,
-        head: [['#', 'Hallazgo', 'Severidad', 'Descripción']],
-        body: findingsData,
-        styles: { fontSize: 9, cellPadding: 3 },
-        headStyles: { fillColor: [41, 128, 185], textColor: 255, fontStyle: 'bold' },
-        alternateRowStyles: { fillColor: [245, 245, 245] },
-        margin: { left: margin, right: margin },
-      });
-
-      yPosition = (doc as any).lastAutoTable.finalY + 10;
-
       // Detalles completos de hallazgos
       report.key_findings.forEach((finding, idx) => {
         if (yPosition > pageHeight - 60) {
@@ -200,6 +180,7 @@ export class PDFExportService {
         doc.text(`Referenciado en: ${finding.document_references.length} documento(s)`, margin + 5, yPosition);
         yPosition += 8;
         doc.setTextColor(0, 0, 0);
+        doc.setFontSize(10);
       });
     }
 

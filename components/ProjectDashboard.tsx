@@ -284,6 +284,10 @@ export function ProjectDashboard({ project, onBack }: ProjectDashboardProps) {
             report={selectedReport}
             projectName={project.name}
             onClose={() => setSelectedReport(null)}
+            onUpdate={() => {
+              setSelectedReport(null);
+              loadReports();
+            }}
           />
         )}
     </div>
